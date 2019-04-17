@@ -140,15 +140,6 @@ impl<T: Clone + Into<u64>> ToSql for DumbHax<T>{
     }
 }
 
-pub struct DumbRoleIdHax(pub RoleId);
-//the above Clone + Into<u64> impl works for everything except RoleIds for some reason???
-impl ToSql for DumbRoleIdHax{
-    fn to_sql(&self) -> sqlite::Result<ToSqlOutput> {
-        let val:u64 = (self.0).0.clone();
-        Ok(ToSqlOutput::from(format!("{}",val)))
-    }
-}
-
 pub trait Snowflake {
     fn get_snowflake(&self) -> u64;
 
