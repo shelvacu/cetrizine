@@ -1,19 +1,23 @@
 #![feature(nll)]
+#![feature(type_alias_enum_variants)]
 
 extern crate serenity;
 extern crate rusqlite as sqlite;
 extern crate chrono;
 extern crate time;
 
-use sqlite::types::{ToSql,ToSqlOutput};
+use sqlite::types::{ToSql,ToSqlOutput,FromSql,FromSqlResult,ValueRef};
 use sqlite::{Connection, NO_PARAMS};
 use sqlite::OptionalExtension;
 
 use std::sync::Mutex;
 use std::env;
 
+const DISCORD_MAX_SNOWFLAKE:u64 = 9223372036854775807;
+
 use serenity::{
     model::{gateway::Ready, channel::Message, channel::MessageType},
+    model::id::*,
     prelude::*,
 };
 
@@ -34,6 +38,35 @@ fn message_type_to_string(m: MessageType) -> String {
         MemberJoin => "MemberJoin",
     }.into()
 }
+
+pub trait EnumIntoString : Sized {
+    fn into_str(&self) -> &'static str;
+    fn from_str<'a>(input: &'a str) -> Option<Self>;
+}
+
+macro_rules! enum_stringify {
+    ( $enum:ty => $( $var:ident ),+ ) => {
+        impl EnumIntoString for $enum {
+            fn into_str(&self) -> &'static str {
+                match self {
+                    $( <$enum>::$var => stringify!($var), )+
+                }
+            }
+            fn from_str<'a>(input: &'a str) -> Option<Self> {
+                match input {
+                    $( v if v == stringify!($var) => Some(<$enum>::$var), )+
+                    _ => None,
+                }
+            }
+        }
+    };
+}
+
+enum_stringify!{ serenity::model::guild::DefaultMessageNotificationLevel => All, Mentions }
+enum_stringify!{ serenity::model::guild::ExplicitContentFilter => None, WithoutRole, All }
+enum_stringify!{ serenity::model::guild::MfaLevel => None, Elevated }
+enum_stringify!{ serenity::model::guild::VerificationLevel => None, Low, Medium, High, Higher }
+enum_stringify!{ serenity::model::channel::ChannelType => Text, Private, Voice, Group, Category }
 
 fn get_name(chan:serenity::model::channel::Channel) -> String {
     //use serenity::model::channel::Channel;
@@ -104,6 +137,79 @@ impl<T: Clone + Into<u64>> ToSql for DumbHax<T>{
     fn to_sql(&self) -> sqlite::Result<ToSqlOutput> {
         let val:u64 = self.0.clone().into();
         Ok(ToSqlOutput::from(format!("{}",val)))
+    }
+}
+
+pub trait Snowflake {
+    fn get_snowflake(&self) -> u64;
+
+    fn get_snowflake_i64(&self) -> i64 {
+        self.get_snowflake() as i64
+    }
+}
+
+macro_rules! snowflake_impl {
+    ($klass:ty) => {
+        impl Snowflake for $klass {
+            fn get_snowflake(&self) -> u64 {
+                self.0
+            }
+        }
+
+        /*impl ToSql for $klass{
+            fn to_sql(&self) -> sqlite::Result<ToSqlOutput> {
+                Ok(ToSqlOutput::Owned(sqlite::types::Value::Integer(self.get_snowflake_i64())))
+            }
+        }*/
+    };
+}
+
+snowflake_impl!{ApplicationId}
+snowflake_impl!{AuditLogEntryId}
+snowflake_impl!{ChannelId}
+snowflake_impl!{EmojiId}
+snowflake_impl!{GuildId}
+snowflake_impl!{IntegrationId}
+snowflake_impl!{MessageId}
+snowflake_impl!{RoleId}
+snowflake_impl!{UserId}
+snowflake_impl!{WebhookId}
+
+pub struct SmartHax<T>(pub T);
+
+impl<T: Snowflake> ToSql for SmartHax<T>{
+    fn to_sql(&self) -> sqlite::Result<ToSqlOutput> {
+        Ok(ToSqlOutput::Owned(sqlite::types::Value::Integer(self.0.get_snowflake_i64())))
+    }
+}
+
+impl<U: Snowflake + Copy> ToSql for SmartHax<Option<U>>{
+    fn to_sql(&self) -> sqlite::Result<ToSqlOutput> {
+        let val = match self.0 {
+            Some(v) => sqlite::types::Value::Integer(v.get_snowflake_i64()),
+            None => sqlite::types::Value::Null,
+        };
+        Ok(ToSqlOutput::Owned(val))
+    }
+}
+
+pub struct PermsToSql(pub serenity::model::permissions::Permissions);
+
+impl ToSql for PermsToSql{
+    fn to_sql(&self) -> sqlite::Result<ToSqlOutput> {
+        let val_u:u64 = self.0.bits();
+        let val_i:i64 = unsafe { std::mem::transmute(val_u) };
+        //(val_i.clone()).to_sql()
+        Ok(ToSqlOutput::Owned(sqlite::types::Value::Integer(val_i)))
+    }
+}
+
+impl FromSql for PermsToSql{
+    fn column_result(value: ValueRef) -> FromSqlResult<Self> {
+        i64::column_result(value).map(|val_i| {
+            let val_u:u64 = unsafe { std::mem::transmute(val_i) };
+            Self(serenity::model::permissions::Permissions::from_bits_truncate(val_u))
+        })
     }
 }
 
@@ -223,6 +329,7 @@ archive_recvd_at
     
     /// This func assumes it's already in its own thread, and will block until complete
     fn grab_archive<'a>(_: Context, rdy: Ready) -> Result<(), CetrizineError<'a>> {
+        let func_start = chrono::offset::Local::now();
         let mut conn = make_conn();
         //TODO: insert some tuple for the ready
         for guild_status in &rdy.guilds {
@@ -234,6 +341,168 @@ archive_recvd_at
                 }
             };
             println!("ARCHIVING GUILD {:?}", &guild);
+
+            let tx = conn.transaction()?;
+
+            tx.execute("INSERT INTO guild (
+discord_id,
+afk_channel_id,
+afk_timeout,
+application_id,
+default_message_notification_level,
+explicit_content_filter,
+features,
+icon,
+joined_at,
+large,
+member_count,
+mfa_level,
+name,
+owner_id,
+region,
+splash,
+system_channel_id,
+verification_level,
+archive_recvd_at ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                       &[
+                           &SmartHax(guild.id) as &ToSql, //discord_id,
+                           &SmartHax(guild.afk_channel_id), //afk_channel_id,
+                           &(guild.afk_timeout as i64), //afk_timeout,
+                           &SmartHax(guild.application_id), //application_id,
+                           &guild.default_message_notifications.into_str(),//default_message_notification_level,
+                           &guild.explicit_content_filter.into_str(),//explicit_content_filter,
+                           &guild.features.join(","),//features,
+                           &guild.icon,//icon,
+                           &guild.joined_at,//joined_at,
+                           &guild.large,//large,
+                           &(guild.member_count as i64),//member_count,
+                           &guild.mfa_level.into_str(),//mfa_level,
+                           &guild.name,//name,
+                           &SmartHax(guild.owner_id),//owner_id,
+                           &guild.region,//region,
+                           &guild.splash,//splash,
+                           &SmartHax(guild.system_channel_id),//system_channel_id,
+                           &guild.verification_level.into_str(),//verification_level,
+                           &func_start,//archive_recvd_at
+                       ]
+            )?;
+
+            let guild_rowid = tx.last_insert_rowid();
+
+            //channels
+            for (_id, chan_a_lock) in &guild.channels {
+                let chan = chan_a_lock.read();
+                tx.execute("INSERT INTO guild_channel (
+discord_id,
+guild_rowid,
+guild_id,
+bitrate,
+category_id,
+kind,
+last_message_id,
+last_pin_timestamp,
+name,
+position,
+topic,
+user_limit,
+nsfw
+) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                           &[
+                               &SmartHax(chan.id) as &ToSql,
+                               &guild_rowid,//guild_rowid,
+                               &SmartHax(chan.guild_id),//guild_id,
+                               &chan.bitrate.map(|b| b as i64),//bitrate,
+                               &SmartHax(chan.category_id),//category_id,
+                               &chan.kind.into_str(),//kind,
+                               &SmartHax(chan.last_message_id),//last_message_id,
+                               &chan.last_pin_timestamp,//last_pin_timestamp,
+                               &chan.name,//name,
+                               &chan.position,//position,
+                               &chan.topic,//topic,
+                               &chan.user_limit.map(|u| u as i64),//user_limit,
+                               &chan.nsfw,//nsfw
+                           ]
+                )?;
+
+                let chan_rowid = tx.last_insert_rowid();
+
+                for overwrite in &chan.permission_overwrites {
+                    use serenity::model::channel::PermissionOverwriteType::*;
+                    let (ov_type_str, ov_id) = match overwrite.kind {
+                        Member(uid) => ("Member", uid.0),
+                        Role(rid) => ("Role", rid.0),
+                    };
+
+                    tx.execute("INSERT INTO permission_overwrite (
+guild_channel_rowid,
+allow_bits,
+deny_bits,
+permission_overwrite_type,
+permission_overwrite_id
+) VALUES (?,?,?,?,?)",
+                               &[
+                                   &chan_rowid as &ToSql,
+                                   &PermsToSql(overwrite.allow),
+                                   &PermsToSql(overwrite.deny),
+                                   &ov_type_str,
+                                   &(ov_id as i64),
+                               ]
+                    )?;
+                }
+            }
+
+            //emojis
+            for (_, emoji) in &guild.emojis {
+                tx.execute(
+                    "INSERT INTO id_arr (row_id) VALUES (null)",
+                    NO_PARAMS
+                )?;
+
+                let id_arr_rowid = tx.last_insert_rowid();
+
+                for role_id in &emoji.roles {
+                    tx.execute(
+                        "INSERT INTO id (id_arr_rowid, id) VALUES (?,?)",
+                        &[
+                            &id_arr_rowid as &ToSql,
+                            &DumbHax(role_id),
+                        ]
+                    )?;
+                }
+
+                tx.execute("INSERT INTO emoji (
+discord_id,
+guild_rowid,
+animated,
+name,
+managed,
+require_colons,
+roles
+) VALUES (?,?,?,?,?,?,?)",
+                           &[
+                               &SmartHax(emoji.id) as &ToSql,//discord_id,
+                               &guild_rowid,//guild_rowid,
+                               &emoji.animated,//animated,
+                               &emoji.name,//name,
+                               &emoji.managed,//managed,
+                               &emoji.require_colons,//require_colons,
+                               &id_arr_rowid,//roles
+                           ]
+                )?;
+            }
+
+            //members
+            //for (_, member) in &guild.members
+
+            //presences
+
+            //roles
+
+            //voice_states
+
+
+            tx.commit()?;
+            
             for (chan_id, chan) in guild.id.channels()? {
                 use serenity::model::channel::ChannelType::*;
                 match chan.kind {
@@ -261,7 +530,7 @@ archive_recvd_at
 substr('00000000000000000000'||start_message_id, -20, 20)
 <=
 substr('00000000000000000000'||?1, -20, 20)
-&&
+AND
 substr('00000000000000000000'||?1, -20, 20)
 <=
 substr('00000000000000000000'||end_message_id, -20, 20) )
@@ -270,7 +539,7 @@ ORDER BY substr('00000000000000000000'||end_message_id, -20, 20) ASC LIMIT 1;",
                     |r| Ok((r.get::<_,String>(0)?.parse::<u64>().unwrap(),r.get::<_,Option<String>>(1)?))
                 ).optional()?;
 
-                let mut get_before = std::u64::MAX;
+                let mut get_before = DISCORD_MAX_SNOWFLAKE;
                 //let before_id:u64 = last_msg_id.into();
                 let mut before_message_id:Option<String>;// = Some(before_id.to_string());
                 
@@ -283,7 +552,7 @@ ORDER BY substr('00000000000000000000'||end_message_id, -20, 20) ASC LIMIT 1;",
 substr('00000000000000000000'||start_message_id, -20, 20)
 <
 substr('00000000000000000000'||?1, -20, 20)
-&&
+AND
 substr('00000000000000000000'||?1, -20, 20)
 <=
 substr('00000000000000000000'||end_message_id, -20, 20) ) OR
@@ -303,7 +572,7 @@ ORDER BY substr('00000000000000000000'||start_message_id, -20, 20) ASC LIMIT 1;"
                     |r| r.get(0)
                 ).optional()?.unwrap_or(String::from("0")).parse::<u64>().unwrap();
 
-                let mut earliest_message_recvd = std::u64::MAX;
+                let mut earliest_message_recvd = DISCORD_MAX_SNOWFLAKE;
 
                 while earliest_message_recvd > gap_end {
                     let asking_for = 100u8;
@@ -317,20 +586,22 @@ ORDER BY substr('00000000000000000000'||start_message_id, -20, 20) ASC LIMIT 1;"
                     let recvd_at = chrono::offset::Local::now();
                     let tx = conn.transaction()?;
                     for msg in &msgs {
-                        println!("Message id {:?}", msg.id);
+                        //println!("Message id {:?}", msg.id);
                         Self::archive_message(&tx, msg, recvd_at)?;
                     }
                     if msgs.len() == 0 { break }
                     tx.execute("INSERT INTO message_archive_gets (
 channel_id,
+before_message_id,
 start_message_id,
 end_message_id,
 message_count_requested,
 message_count_received,
 received_live
-) VALUES (?,?,?,?,?,?)",
+) VALUES (?,?,?,?,?,?,?)",
                                &[
                                    &DumbHax(chan_id) as &ToSql,
+                                   &DumbHax(earliest_message_recvd),
                                    &DumbHax(msgs.first().unwrap().id),
                                    &DumbHax(msgs.last().unwrap().id),
                                    &asking_for,
@@ -339,7 +610,7 @@ received_live
                                ]
                     )?;
                     tx.commit()?;
-
+                    println!("Archived {} message(s), {} thru {} in {}#{}", msgs.len(), msgs.first().unwrap().id, msgs.last().unwrap().id, guild.name, chan.name);
                     earliest_message_recvd = msgs.last().unwrap().id.into();
                 } //while earliest_message_recvd > gap_end {
                 //TODO: We've either come to the end of messages in this channel,
@@ -382,7 +653,13 @@ impl EventHandler for Handler {
     fn ready(&self, ctx: Context, ready: Ready) {
         println!("READY: {:#?}",ready);
         std::thread::spawn(move || {
-            Self::grab_archive(ctx, ready).unwrap();
+            let res = Self::grab_archive(ctx, ready);
+            if let Err(CetrizineError::Serenity(serenity::Error::Http(serenity::prelude::HttpError::UnsuccessfulRequest(mut http_response)))) = res {
+                eprintln!("http response: {:?}", http_response);
+                let mut body = String::new();
+                std::io::Read::read_to_string(&mut http_response, &mut body).unwrap();
+                eprintln!("body: {:?}", body);
+            }else{ res.unwrap() }
         });
     }
 
@@ -523,6 +800,121 @@ name text not null,
 value text not null
 )", NO_PARAMS).unwrap();
 
+    conn.execute("CREATE TABLE IF NOT EXISTS guild (
+discord_id int not null,
+afk_channel_id int,
+afk_timeout int not null,
+application_id int,
+--channels
+default_message_notification_level int not null,
+--emojis
+explicit_content_filter text not null,
+features text not null, --comma separated
+icon text,
+joined_at text not null, --datetime
+large int not null, --bool
+member_count int not null,
+--members
+mfa_level text not null,
+name text not null,
+owner_id int not null,
+--presences
+region text not null,
+--roles
+splash text,
+system_channel_id int,
+verification_level text not null,
+--voice states
+archive_recvd_at text not null --datetime
+)", NO_PARAMS).unwrap();
+    
+    conn.execute("CREATE TABLE IF NOT EXISTS guild_channel (
+discord_id int not null,
+guild_rowid int not null REFERENCES guild(rowid),
+guild_id int not null,
+bitrate int,
+category_id int,
+kind text not null,
+last_message_id int,
+last_pin_timestamp text, --datetime
+name text not null,
+--permission overwrites
+position int not null, --can be negative!
+topic text,
+user_limit int,
+nsfw int not null --bool
+)", NO_PARAMS).unwrap();
+
+    conn.execute("CREATE TABLE IF NOT EXISTS emoji (
+discord_id int not null,
+guild_rowid int not null REFERENCES guild(rowid),
+animated int not null, --bool
+name text not null,
+managed int not null, --bool
+require_colons int not null, --bool
+roles int not null REFERENCES id_arr(row_id)
+)", NO_PARAMS).unwrap();
+
+    conn.execute("CREATE TABLE IF NOT EXISTS member (
+guild_rowid int not null REFERENCES guild(rowid),
+deaf int not null, --bool
+guild_id int not null,
+joined_at text, --datetime
+mute int not null,
+nick text,
+roles int not null REFERENCES id_arr(row_id),
+user_id int not null,
+user_avatar text,
+user_is_bot int not null, --bool
+user_discriminator int not null,
+user_name text not null
+)", NO_PARAMS).unwrap();
+
+    conn.execute("CREATE TABLE IF NOT EXISTS user_presence (
+guild_rowid int not null REFERENCES guild(rowid),
+game_is_some int not null, --bool
+game_type text,
+game_name text,
+game_url text,
+last_modified text, --apparently might be null????
+nick text,
+status text,
+user_id int
+)", NO_PARAMS).unwrap();
+
+    conn.execute("CREATE TABLE IF NOT EXISTS voice_state (
+guild_rowid int not null REFERENCES guild(rowid),
+channel_id int,
+deaf int not null, --bool
+mute int not null, --bool
+self_deaf int not null, --bool
+self_mute int not null, --bool
+session_id text not null,
+suppress int not null, --bool
+token text,
+user_id: int
+)", NO_PARAMS).unwrap();
+
+    conn.execute("CREATE TABLE IF NOT EXISTS guild_role (
+discord_id int not null,
+guild_rowid int not null REFERENCES guild(rowid),
+colour_u32 int not null,
+hoist int not null, --bool
+managed int not null, --bool
+mentionable int not null, --bool
+name text not null,
+permissions_bits int not null,
+position int not null
+)", NO_PARAMS).unwrap();
+
+    conn.execute("CREATE TABLE IF NOT EXISTS permission_overwrite (
+guild_channel_rowid int not null REFERENCES guild_channel(rowid),
+allow_bits int not null,
+deny_bits int not null,
+permission_overwrite_type text not null,
+permission_overwrite_id int not null
+)", NO_PARAMS).unwrap();
+
     conn.execute("CREATE TABLE IF NOT EXISTS message_archive_gets (
 channel_id text not null,
 after_message_id text,
@@ -537,8 +929,8 @@ received_live int not null --bool
 
     conn.execute("CREATE INDEX IF NOT EXISTS mag_start ON message_archive_gets (substr('00000000000000000000'||start_message_id, -20, 20))", NO_PARAMS).unwrap();
     conn.execute("CREATE INDEX IF NOT EXISTS mag_end   ON message_archive_gets (substr('00000000000000000000'||  end_message_id, -20, 20))", NO_PARAMS).unwrap();
-    conn.execute("CREATE INDEX IF NOT EXISTS mag_start_plain ON message_archve_gets(start_message_id)", NO_PARAMS).unwrap();
-    conn.execute("CREATE INDEX IF NOT EXISTS mag_start_plain ON message_archve_gets(end_message_id)", NO_PARAMS).unwrap();
+    conn.execute("CREATE INDEX IF NOT EXISTS mag_start_plain ON message_archive_gets(start_message_id)", NO_PARAMS).unwrap();
+    conn.execute("CREATE INDEX IF NOT EXISTS mag_start_plain ON message_archive_gets(end_message_id)", NO_PARAMS).unwrap();
         
     let handler = Handler{conn: Mutex::new(conn)};
     let mut client = Client::new(&token, handler).expect("Err creating client");
