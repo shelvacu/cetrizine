@@ -131,11 +131,20 @@ impl<'a> From<serenity::Error> for CetrizineError<'a> {
     }
 }
 
-pub struct DumbHax<T: Clone + Into<u64>>(pub T);
+pub struct DumbHax<T>(pub T);
 
 impl<T: Clone + Into<u64>> ToSql for DumbHax<T>{
     fn to_sql(&self) -> sqlite::Result<ToSqlOutput> {
         let val:u64 = self.0.clone().into();
+        Ok(ToSqlOutput::from(format!("{}",val)))
+    }
+}
+
+pub struct DumbRoleIdHax(pub RoleId);
+//the above Clone + Into<u64> impl works for everything except RoleIds for some reason???
+impl ToSql for DumbRoleIdHax{
+    fn to_sql(&self) -> sqlite::Result<ToSqlOutput> {
+        let val:u64 = (self.0).0.clone();
         Ok(ToSqlOutput::from(format!("{}",val)))
     }
 }
