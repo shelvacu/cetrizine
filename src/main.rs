@@ -337,39 +337,6 @@ archive_recvd_at
 
         //attachments
         for attachment in &msg.attachments {
-            /*{
-                let table_name = "attachment" ;
-                let values : & [ & ToSql ] = & [
-                    & message_rowid as & ToSql ,
-                    & DumbHax(attachment.id) as & ToSql ,
-                    & attachment.filename as & ToSql ,
-                    & attachment.height.map(|h| h as i64) as & ToSql ,
-                    & attachment.width.map(|w| w as i64) as & ToSql ,
-                    & attachment.proxy_url as & ToSql ,
-                    & (attachment.size as i64) as & ToSql ,
-                    & attachment.url as & ToSql ,
-                ] ;
-                let sql_column_names = & [
-                    "message_rowid" ,
-                    "discord_id" ,
-                    "filename" ,
-                    "height" ,
-                    "width" ,
-                    "proxy_url",
-                    "size" ,
-                    "url" ,
-                ] ;
-                let placeholders : Vec < & str > = sql_column_names .
-                    into_iter (  ) . map ( | a | "?" ) . collect (  ) ;
-
-                let sql = & [
-                    "INSERT INTO " , table_name ,
-                    " (" , & sql_column_names . join ( "," ) , ") " ,
-                    "VALUES (" , & placeholders . join ( "," ) , ") " ,
-                ] . join ( "" ) ;
-                tx . execute ( sql , values )
-            }*/
-            //trace_macros!(true);
             insert_helper!(
                 tx, "attachment",
                 "message_rowid" => message_rowid,
@@ -381,28 +348,6 @@ archive_recvd_at
                 "size" => (attachment.size as i64),
                 "url" => attachment.url,
             )?;
-            //trace_macros!(false);
-            /*tx.execute("INSERT INTO attachment (
-message_rowid,
-discord_id,
-filename,
-height,
-width,
-proxy_url,
-size,
-url
-) VALUES (?,?,?,?,?,?,?,?,?)",
-                       &[
-                           &message_rowid as &ToSql,
-                           &DumbHax(attachment.id),
-                           &attachment.filename,
-                           &attachment.height.map(|h| h as i64),
-                           &attachment.width.map(|w| w as i64),
-                           &attachment.proxy_url,
-                           &(attachment.size as i64),
-                           &attachment.url,
-                       ]
-            )?;*/
         }
 
         //embeds
@@ -1264,7 +1209,8 @@ game_url text,
 last_modified int, --apparently might be null????
 nick text,
 status text,
-user_id int not null
+user_id int not null,
+CHECK ( (ready_rowid NOT NULL OR guild_rowid NOT NULL) AND (ready_rowid NULL OR guild_rowid NULL) )
 )", NO_PARAMS).unwrap();
 
     conn.execute("CREATE TABLE IF NOT EXISTS voice_state (
