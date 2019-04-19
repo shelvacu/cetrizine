@@ -340,7 +340,7 @@ archive_recvd_at
             insert_helper!(
                 tx, "attachment",
                 "message_rowid" => message_rowid,
-                "discord_id" => attachment.id.parse::<i64>().unwrap(),
+                "discord_id" => attachment.id.parse::<i64>().expect("could not parse attachment discord id"),
                 "filename" => attachment.filename,
                 "height" => attachment.height.map(|h| h as i64),
                 "width" => attachment.width.map(|w| w as i64),
@@ -824,7 +824,7 @@ substr('00000000000000000000'||?1, -20, 20)
 substr('00000000000000000000'||end_message_id, -20, 20) )
 ORDER BY substr('00000000000000000000'||end_message_id, -20, 20) ASC LIMIT 1;",
                     &[&DumbHax(last_msg_id) as &ToSql],
-                    |r| Ok((r.get::<_,String>(0)?.parse::<u64>().unwrap(),r.get::<_,Option<String>>(1)?))
+                    |r| Ok((r.get::<_,String>(0)?.parse::<u64>().expect("failed to parse start_message_id as u64 - 1"),r.get::<_,Option<String>>(1)?))
                 ).optional()?;
 
                 let mut get_before = DISCORD_MAX_SNOWFLAKE;
@@ -848,7 +848,7 @@ before_message_id = ?1 OR
 (?2 NOT NULL AND end_message_id = ?2)
 ORDER BY substr('00000000000000000000'||start_message_id, -20, 20) ASC LIMIT 1;",
                         &[&DumbHax(get_before) as &ToSql,&before_message_id],
-                        |r| Ok((r.get::<_,String>(0)?.parse::<u64>().unwrap(),r.get::<_,Option<String>>(1)?))
+                        |r| Ok((r.get::<_,String>(0)?.parse::<u64>().expect("failed to parse start_message_id as u64 - 2"),r.get::<_,Option<String>>(1)?))
                     ).optional()?;
                 }
 
@@ -858,7 +858,7 @@ ORDER BY substr('00000000000000000000'||start_message_id, -20, 20) ASC LIMIT 1;"
                     "SELECT end_message_id FROM message_archive_gets WHERE substr('00000000000000000000'||end_message_id, -20, 20) < substr('00000000000000000000'||?1, -20, 20) ORDER BY substr('00000000000000000000'||start_message_id, -20, 20) ASC LIMIT 1;",
                     &[&DumbHax(get_before) as &ToSql],
                     |r| r.get(0)
-                ).optional()?.unwrap_or(String::from("0")).parse::<u64>().unwrap();
+                ).optional()?.unwrap_or(String::from("0")).parse::<u64>().expect("could not parse end message id");
 
                 let mut earliest_message_recvd = DISCORD_MAX_SNOWFLAKE;
 
@@ -883,8 +883,8 @@ ORDER BY substr('00000000000000000000'||start_message_id, -20, 20) ASC LIMIT 1;"
                         tx, "message_archive_gets",
                         "channel_id" => DumbHax(chan_id),
                         "before_message_id" => DumbHax(earliest_message_recvd),
-                        "start_message_id" => DumbHax(msgs.first().unwrap().id),
-                        "end_message_id" => DumbHax(msgs.last().unwrap().id),
+                        "start_message_id" => DumbHax(msgs.first().expect("im a bad programmer").id),
+                        "end_message_id" => DumbHax(msgs.last().expect("im a bad programmer").id),
                         "message_count_requested" => asking_for,
                         "message_count_received" => (msgs.len() as i64),
                         "received_live" => false,
@@ -909,8 +909,8 @@ received_live
                                ]
                     )?;*/
                     tx.commit()?;
-                    println!("Archived {} message(s), {} thru {} in {}#{}", msgs.len(), msgs.first().unwrap().id, msgs.last().unwrap().id, guild.name, chan.name);
-                    earliest_message_recvd = msgs.last().unwrap().id.into();
+                    println!("Archived {} message(s), {} thru {} in {}#{}", msgs.len(), msgs.first().expect("im a bad programmer").id, msgs.last().expect("im a bad programmer").id, guild.name, chan.name);
+                    earliest_message_recvd = msgs.last().expect("im a bad programmer").id.into();
                 } //while earliest_message_recvd > gap_end {
                 //TODO: We've either come to the end of messages in this channel,
                 // or the end of this gap. if it's the latter, we should continue.
@@ -956,13 +956,14 @@ impl EventHandler for Handler {
             if let Err(CetrizineError::Serenity(serenity::Error::Http(serenity::prelude::HttpError::UnsuccessfulRequest(mut http_response)))) = res {
                 eprintln!("http response: {:?}", http_response);
                 let mut body = String::new();
-                std::io::Read::read_to_string(&mut http_response, &mut body).unwrap();
+                std::io::Read::read_to_string(&mut http_response, &mut body).expect("could not read http body");
                 eprintln!("body: {:?}", body);
-            }else{ res.unwrap() }
+            }else{ res.expect("unable to grab archive") }
         });
     }
 
     fn message(&self, ctx: Context, msg: Message) {
+        println!("MESSAGE");
         match self.message_result(ctx, msg) {
             Ok(()) => (),
             Err(e) => eprintln!("ERROR: {:?}", e),
@@ -975,7 +976,7 @@ fn make_conn() -> Connection {
     conn.set_db_config(
         sqlite::config::DbConfig::SQLITE_DBCONFIG_ENABLE_FKEY,
         true,
-    ).unwrap();
+    ).expect("could not set db config to enable foreign keys");
 
     return conn;
 }
@@ -988,6 +989,8 @@ fn main() {
 
     let conn = make_conn();
     //conn.execute("PRAGMA foreign_keys = ON;").unwrap();
+
+    println!("A");
     conn.execute("CREATE TABLE IF NOT EXISTS message (
 --implied rowid
 discord_id text not null,
@@ -1210,7 +1213,7 @@ last_modified int, --apparently might be null????
 nick text,
 status text,
 user_id int not null,
-CHECK ( (ready_rowid NOT NULL OR guild_rowid NOT NULL) AND (ready_rowid NULL OR guild_rowid NULL) )
+CHECK ( (ready_rowid NOT NULL OR guild_rowid NOT NULL) AND (ready_rowid IS NULL OR guild_rowid IS NULL) )
 )", NO_PARAMS).unwrap();
 
     conn.execute("CREATE TABLE IF NOT EXISTS voice_state (
@@ -1237,7 +1240,7 @@ name text not null,
 permissions_bits int not null,
 position int not null
 )", NO_PARAMS).unwrap();
-
+    println!("2");
     conn.execute("CREATE TABLE IF NOT EXISTS permission_overwrite (
 guild_channel_rowid int not null REFERENCES guild_channel(rowid),
 allow_bits int not null,
@@ -1257,15 +1260,17 @@ message_count_requested int not null,
 message_count_received int not null,
 received_live int not null --bool
 )", NO_PARAMS).unwrap();
-
+    println!("3");
     conn.execute("CREATE INDEX IF NOT EXISTS mag_start ON message_archive_gets (substr('00000000000000000000'||start_message_id, -20, 20))", NO_PARAMS).unwrap();
     conn.execute("CREATE INDEX IF NOT EXISTS mag_end   ON message_archive_gets (substr('00000000000000000000'||  end_message_id, -20, 20))", NO_PARAMS).unwrap();
     conn.execute("CREATE INDEX IF NOT EXISTS mag_start_plain ON message_archive_gets(start_message_id)", NO_PARAMS).unwrap();
     conn.execute("CREATE INDEX IF NOT EXISTS mag_start_plain ON message_archive_gets(end_message_id)", NO_PARAMS).unwrap();
-        
+
+    println!("Z");
+    
     let handler = Handler{conn: Mutex::new(conn)};
     let mut client = Client::new(&token, handler).expect("Err creating client");
-
+    println!("client created!");
     if let Err(why) = client.start() {
         eprintln!("Client error: {:?}", why);
     }

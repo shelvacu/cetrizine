@@ -5,7 +5,7 @@ authors = ["Shelvacu <shelvacu@gmail.com>"]
 edition = "2018"
 
 [dependencies]
-serenity = { version = "0.5.13", path = "../../serenity/", default-features = true }
+serenity = { version = "0.5.13", path = "../serenity/", default-features = true }
 rusqlite = { version = "0.17", features = ["chrono"] }
 chrono = "*"
 time = "*"
