@@ -1008,7 +1008,7 @@ fn main() {
 
 
     conn.execute("CREATE TABLE IF NOT EXISTS message (
---implied rowid
+rowid integer primary key autoincrement,
 discord_id text not null,
 --attachments
 author_id text not null,
@@ -1040,6 +1040,7 @@ archive_recvd_at text not null --datetime
 )", NO_PARAMS).unwrap();
 
     conn.execute("CREATE TABLE IF NOT EXISTS user_mention (
+rowid integer primary key autoincrement,
 message_rowid int not null REFERENCES message(rowid),
 id int not null,
 avatar text,
@@ -1049,6 +1050,7 @@ name text not null
 )", NO_PARAMS).unwrap();
     
     conn.execute("CREATE TABLE IF NOT EXISTS reaction (
+rowid integer primary key autoincrement,
 message_rowid int not null REFERENCES message(rowid),
 count int not null,
 me int not null, --bool
@@ -1073,6 +1075,7 @@ id text not null
 )", NO_PARAMS).unwrap();
 
     conn.execute("CREATE TABLE IF NOT EXISTS attachment (
+rowid integer primary key autoincrement,
 message_rowid int not null REFERENCES message(rowid),
 discord_id text not null,
 filename text not null,
@@ -1084,6 +1087,7 @@ url text not null
 )", NO_PARAMS).unwrap();
 
     conn.execute("CREATE TABLE IF NOT EXISTS embed (
+rowid integer primary key autoincrement,
 message_rowid int not null REFERENCES message(rowid),
 author_is_some int not null, --bool
 author_icon_url text,
@@ -1122,6 +1126,7 @@ video_url text
 ", NO_PARAMS).unwrap();
 
     conn.execute("CREATE TABLE IF NOT EXISTS embed_field (
+rowid integer primary key autoincrement,
 embed_rowid int not null REFERENCES embed(rowid),
 inline int not null, --bool
 name text not null,
@@ -1129,6 +1134,7 @@ value text not null
 )", NO_PARAMS).unwrap();
 
     conn.execute("CREATE TABLE IF NOT EXISTS ready (
+rowid integer primary key autoincrement,
 --guilds
 --presences
 --private_channels
@@ -1148,6 +1154,7 @@ version int not null
 )", NO_PARAMS).unwrap();
     
     conn.execute("CREATE TABLE IF NOT EXISTS guild (
+rowid integer primary key autoincrement,
 ready_rowid int REFERENCES ready(rowid), --possibly null
 discord_id int not null,
 afk_channel_id int,
@@ -1177,6 +1184,7 @@ archive_recvd_at text not null --datetime
 )", NO_PARAMS).unwrap();
     
     conn.execute("CREATE TABLE IF NOT EXISTS guild_channel (
+rowid integer primary key autoincrement,
 discord_id int not null,
 guild_rowid int not null REFERENCES guild(rowid),
 guild_id int not null,
@@ -1194,6 +1202,7 @@ nsfw int not null --bool
 )", NO_PARAMS).unwrap();
 
     conn.execute("CREATE TABLE IF NOT EXISTS emoji (
+rowid integer primary key autoincrement,
 discord_id int not null,
 guild_rowid int not null REFERENCES guild(rowid),
 animated int not null, --bool
@@ -1204,6 +1213,7 @@ roles int not null REFERENCES id_arr(row_id)
 )", NO_PARAMS).unwrap();
 
     conn.execute("CREATE TABLE IF NOT EXISTS member (
+rowid integer primary key autoincrement,
 guild_rowid int not null REFERENCES guild(rowid),
 deaf int not null, --bool
 guild_id int not null,
@@ -1219,6 +1229,7 @@ user_name text not null
 )", NO_PARAMS).unwrap();
 
     conn.execute("CREATE TABLE IF NOT EXISTS user_presence (
+rowid integer primary key autoincrement,
 ready_rowid int REFERENCES ready(rowid),
 guild_rowid int REFERENCES guild(rowid),
 game_is_some int not null, --bool
@@ -1233,6 +1244,7 @@ CHECK ( (ready_rowid NOT NULL OR guild_rowid NOT NULL) AND (ready_rowid IS NULL 
 )", NO_PARAMS).unwrap();
 
     conn.execute("CREATE TABLE IF NOT EXISTS voice_state (
+rowid integer primary key autoincrement,
 guild_rowid int not null REFERENCES guild(rowid),
 channel_id int,
 deaf int not null, --bool
@@ -1246,6 +1258,7 @@ user_id int
 )", NO_PARAMS).unwrap();
 
     conn.execute("CREATE TABLE IF NOT EXISTS guild_role (
+rowid integer primary key autoincrement,
 discord_id int not null,
 guild_rowid int not null REFERENCES guild(rowid),
 colour_u32 int not null,
@@ -1258,6 +1271,7 @@ position int not null
 )", NO_PARAMS).unwrap();
 
     conn.execute("CREATE TABLE IF NOT EXISTS permission_overwrite (
+rowid integer primary key autoincrement,
 guild_channel_rowid int not null REFERENCES guild_channel(rowid),
 allow_bits int not null,
 deny_bits int not null,
@@ -1266,6 +1280,7 @@ permission_overwrite_id int not null
 )", NO_PARAMS).unwrap();
 
     conn.execute("CREATE TABLE IF NOT EXISTS message_archive_gets (
+rowid integer primary key autoincrement,
 channel_id text not null,
 after_message_id text,
 around_message_id text,
