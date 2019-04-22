@@ -471,6 +471,7 @@ archive_recvd_at
             insert_helper!(
                 tx, "user_presence",
                 "ready_rowid" => ready_rowid,
+                "guild_rowid" => (None as Option<i64>),
                 "game_is_some" => presence.game.is_some(),
                 "game_type" => presence.game.clone().map(|g| g.kind.into_str()),
                 "game_name" => presence.game.clone().map(|g| g.name),
@@ -705,7 +706,21 @@ user_name
 
             //presences
             for (_, presence) in &guild.presences {
-                tx.execute("INSERT INTO user_presence (
+                insert_helper!(
+                    tx, "user_presence",
+                    "ready_rowid" => (None as Option<i64>),
+                    "guild_rowid" => guild_rowid, //guild_rowid
+                    "game_is_some" => presence.game.is_some(), //game_is_some
+                    "game_type" => presence.game.clone().map(|g| g.kind.into_str()), //game_type
+                    "game_name" => presence.game.clone().map(|g| g.name), //game_name
+                    "game_url" => presence.game.clone().map(|g| g.url), //game_url
+                    "last_modified" => presence.last_modified.map(|v| v as i64),
+                    "nick" => presence.nick,
+                    "status" => presence.status.into_str(),
+                    "user_id" => SmartHax(presence.user_id),
+                )?;
+                /*tx.execute("INSERT INTO user_presence (
+ready_rowid,
 guild_rowid,
 game_is_some,
 game_type,
@@ -715,8 +730,9 @@ last_modified,
 nick,
 status,
 user_id
-) VALUES (?,?,?,?,?,?,?,?,?)",
+) VALUES (?,?,?,?,?,?,?,?,?,?)",
                            &[
+                               &(None as Option<i64>) as &ToSql,
                                &guild_rowid as &ToSql, //guild_rowid
                                &presence.game.is_some(), //game_is_some
                                &presence.game.clone().map(|g| g.kind.into_str()), //game_type
@@ -727,7 +743,7 @@ user_id
                                &presence.status.into_str(),
                                &SmartHax(presence.user_id),
                            ]
-                )?;
+                )?;*/
             }
 
             //roles
@@ -963,7 +979,7 @@ impl EventHandler for Handler {
     }
 
     fn message(&self, ctx: Context, msg: Message) {
-        println!("MESSAGE");
+
         match self.message_result(ctx, msg) {
             Ok(()) => (),
             Err(e) => eprintln!("ERROR: {:?}", e),
@@ -990,7 +1006,7 @@ fn main() {
     let conn = make_conn();
     //conn.execute("PRAGMA foreign_keys = ON;").unwrap();
 
-    println!("A");
+
     conn.execute("CREATE TABLE IF NOT EXISTS message (
 --implied rowid
 discord_id text not null,
@@ -1118,7 +1134,7 @@ value text not null
 --private_channels
 session_id text not null,
 shard_0 int,
-shart_1 int,
+shard_1 int,
 trace text not null,
 user_id int not null,
 user_avatar text,
@@ -1240,7 +1256,7 @@ name text not null,
 permissions_bits int not null,
 position int not null
 )", NO_PARAMS).unwrap();
-    println!("2");
+
     conn.execute("CREATE TABLE IF NOT EXISTS permission_overwrite (
 guild_channel_rowid int not null REFERENCES guild_channel(rowid),
 allow_bits int not null,
@@ -1260,17 +1276,17 @@ message_count_requested int not null,
 message_count_received int not null,
 received_live int not null --bool
 )", NO_PARAMS).unwrap();
-    println!("3");
+
     conn.execute("CREATE INDEX IF NOT EXISTS mag_start ON message_archive_gets (substr('00000000000000000000'||start_message_id, -20, 20))", NO_PARAMS).unwrap();
     conn.execute("CREATE INDEX IF NOT EXISTS mag_end   ON message_archive_gets (substr('00000000000000000000'||  end_message_id, -20, 20))", NO_PARAMS).unwrap();
     conn.execute("CREATE INDEX IF NOT EXISTS mag_start_plain ON message_archive_gets(start_message_id)", NO_PARAMS).unwrap();
     conn.execute("CREATE INDEX IF NOT EXISTS mag_start_plain ON message_archive_gets(end_message_id)", NO_PARAMS).unwrap();
 
-    println!("Z");
+
     
     let handler = Handler{conn: Mutex::new(conn)};
     let mut client = Client::new(&token, handler).expect("Err creating client");
-    println!("client created!");
+
     if let Err(why) = client.start() {
         eprintln!("Client error: {:?}", why);
     }
