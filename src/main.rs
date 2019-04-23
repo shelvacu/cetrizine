@@ -26,20 +26,6 @@ struct Handler{
     conn: Mutex<Connection>,
 }
 
-fn message_type_to_string(m: MessageType) -> String {
-    use serenity::model::channel::MessageType::*;
-    match m {
-        Regular => "Regular",
-        GroupRecipientAddition => "GroupRecipientAddition",
-        GroupRecipientRemoval => "GroupRecipientRemoval",
-        GroupCallCreation => "GroupCallCreation",
-        GroupNameUpdate => "GroupNameUpdate",
-        GroupIconUpdate => "GroupIconUpdate",
-        PinsAdd => "PinsAdd",
-        MemberJoin => "MemberJoin",
-    }.into()
-}
-
 pub trait EnumIntoString : Sized {
     fn into_str(&self) -> &'static str;
     fn from_str<'a>(input: &'a str) -> Option<Self>;
@@ -88,6 +74,7 @@ macro_rules! enum_stringify {
     };
 }
 
+enum_stringify!{ serenity::model::channel::MessageType => Regular, GroupRecipientAddition, GroupRecipientRemoval, GroupCallCreation, GroupNameUpdate, GroupIconUpdate, PinsAdd, MemberJoin }
 enum_stringify!{ serenity::model::guild::DefaultMessageNotificationLevel => All, Mentions }
 enum_stringify!{ serenity::model::guild::ExplicitContentFilter => None, WithoutRole, All }
 enum_stringify!{ serenity::model::guild::MfaLevel => None, Elevated }
@@ -289,7 +276,7 @@ impl Handler {
             "content_binary" => if is_filtered { Some(msg.content.as_bytes()) } else { None },
             "edited_timestamp" => msg.edited_timestamp,
             "guild_id" => msg.guild_id.map(|gid| DumbHax(gid)),
-            "kind" => message_type_to_string(msg.kind),
+            "kind" => msg.kind.into_str(),
             "member_is_some" => memb.is_some(),
             "member_deaf" => memb.clone().map(|m| m.deaf),
             "member_joined_at" => memb.clone().map(|m| m.joined_at),
