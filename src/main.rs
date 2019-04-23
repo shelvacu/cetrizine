@@ -1,6 +1,5 @@
-#![feature(nll)]
 #![feature(type_alias_enum_variants)]
-#![error(unused_must_use)]
+//#![error(unused_must_use)] TODO: make these warnings into errors
 
 extern crate serenity;
 extern crate rusqlite as sqlite;
@@ -17,7 +16,7 @@ use std::env;
 const DISCORD_MAX_SNOWFLAKE:u64 = 9223372036854775807;
 
 use serenity::{
-    model::{gateway::Ready, channel::Message, channel::MessageType},
+    model::{gateway::Ready, channel::Message},
     model::id::*,
     prelude::*,
 };
@@ -57,7 +56,7 @@ macro_rules! insert_helper {
 }
 
 macro_rules! enum_stringify {
-    ( $enum:ty => $( $var:ident ),+ ) => {
+    ( $enum:path => $( $var:ident ),+ ) => {
         impl EnumIntoString for $enum {
             fn into_str(&self) -> &'static str {
                 match self {
@@ -84,7 +83,6 @@ enum_stringify!{ serenity::model::gateway::GameType => Playing, Streaming, Liste
 enum_stringify!{ serenity::model::user::OnlineStatus => DoNotDisturb, Idle, Invisible, Offline, Online }
 
 fn get_name(chan:serenity::model::channel::Channel) -> String {
-    //use serenity::model::channel::Channel;
     use serenity::model::channel::Channel::*;
     
     match chan {
@@ -250,8 +248,6 @@ fn make_arr<'a, T: Clone + Into<u64>>(tx: &sqlite::Transaction, arr: &[T]) -> Re
 impl Handler {
     fn archive_message<'a>(tx: &sqlite::Transaction, msg: &Message, recvd_at:chrono::DateTime<chrono::offset::Local>) -> Result<(), CetrizineError<'a>> {
         let memb = &msg.member;
-        //let tx = conn.transaction()?;
-
 
         let member_roles_arr_id = match memb {
             Some(m) => Some(make_arr(tx, &m.roles)?),
@@ -262,7 +258,7 @@ impl Handler {
         
         let mut filtered_content = msg.content.clone();
         filtered_content.retain(|c| c != '\0');
-        let is_filtered = (filtered_content != msg.content);
+        let is_filtered = filtered_content != msg.content;
         insert_helper!(
             tx, "message",
             "discord_id" => DumbHax(msg.id),
