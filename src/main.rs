@@ -1,5 +1,6 @@
 #![feature(nll)]
 #![feature(type_alias_enum_variants)]
+#![error(unused_must_use)]
 
 extern crate serenity;
 extern crate rusqlite as sqlite;
@@ -240,97 +241,68 @@ impl FromSql for PermsToSql{
     }
 }
 
+fn make_arr<'a, T: Clone + Into<u64>>(tx: &sqlite::Transaction, arr: &[T]) -> Result<i64, CetrizineError<'a>> {
+    tx.execute(
+        "INSERT INTO id_arr (row_id) VALUES (null)",
+        NO_PARAMS
+    )?;
+
+    let id = tx.last_insert_rowid();
+
+    for item in arr {
+        insert_helper!(
+            tx, "id",
+            "id_arr_rowid" => id,
+            "id" => DumbHax(item.clone()),
+        )?;
+    }
+
+    return Ok(id)
+}
+
 impl Handler {
     fn archive_message<'a>(tx: &sqlite::Transaction, msg: &Message, recvd_at:chrono::DateTime<chrono::offset::Local>) -> Result<(), CetrizineError<'a>> {
         let memb = &msg.member;
         //let tx = conn.transaction()?;
-        
-        let member_roles_arr_id = if let Some(m) = memb {
-            tx.execute(
-                "INSERT INTO id_arr (row_id) VALUES (null)",
-                NO_PARAMS
-            )?;
-            let id = tx.last_insert_rowid();
-            for r in &m.roles {
-                tx.execute(
-                    "INSERT INTO id (id_arr_rowid, id) VALUES (?1, ?2)",
-                    &[&id as &ToSql,&DumbHax(r.clone())]
-                )?;
-            }
-            Some(id)
-        } else { None };
 
-        let mention_roles_arr_id = {
-            tx.execute(
-                "INSERT INTO id_arr (row_id) VALUES (null)",
-                NO_PARAMS
-            )?;
 
-            let id = tx.last_insert_rowid();
-
-            for r in &msg.mention_roles {
-                tx.execute(
-                    "INSERT INTO id (id_arr_rowid, id) VALUES (?1,?2)",
-                    &[&id as &ToSql,&DumbHax(r.clone())]
-                )?;
-            }
-            id
+        let member_roles_arr_id = match memb {
+            Some(m) => Some(make_arr(tx, &m.roles)?),
+            None => None,
         };
-
-        tx.execute(
-            "INSERT INTO message (
-discord_id,
-author_id, 
-author_avatar,
-author_is_bot,
-author_discriminator,
-author_name,
-channel_id,
-content,
-edited_timestamp,
-guild_id,
-kind,
-member_is_some,
-member_deaf,
-member_joined_at,
-member_mute,
-member_roles, --****
-mention_everyone,
-mention_roles, --****
-nonce_debug,
-pinned,
-timestamp,
-tts,
-webhook_id,
-archive_recvd_at
-) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24)",
-            &[
-                &DumbHax(msg.id) as &ToSql, //discord_id
-                &DumbHax(msg.author.id), //author_id
-                &msg.author.avatar, //author_avatar
-                &msg.author.bot, //author_is_bot
-                &msg.author.discriminator, //author_discriminator
-                &msg.author.name, //author_name
-                &DumbHax(msg.channel_id), //channel_id
-                &msg.content, //content
-                &msg.edited_timestamp, //edited_timestamp
-                &msg.guild_id.map(|gid| DumbHax(gid)), //guild_id
-                &message_type_to_string(msg.kind), //kind
-                &memb.is_some(), //member_is_some
-                &memb.clone().map(|m| m.deaf), //member_deaf
-                &memb.clone().map(|m| m.joined_at), //member_joined_at
-                &memb.clone().map(|m| m.mute), //member_mute
-                &member_roles_arr_id, //member_roles
-                &msg.mention_everyone, //mention_everyone
-                &mention_roles_arr_id, //mention_roles
-                // &mentions_arr_id, //mentions
-                &format!("{:?}",msg.nonce), //nonce_debug
-                &msg.pinned, //pinned
-                &msg.timestamp, //timestamp
-                &msg.tts, //tts
-                &msg.webhook_id.map(|whid| DumbHax(whid)), //webhook_id
-                &recvd_at, //archive_recvd_at
-            ]
+        
+        let mention_roles_arr_id = make_arr(tx, &msg.mention_roles)?;
+        
+        let mut filtered_content = msg.content.clone();
+        filtered_content.retain(|c| c != '\0');
+        let is_filtered = (filtered_content != msg.content);
+        insert_helper!(
+            tx, "message",
+            "discord_id" => DumbHax(msg.id),
+            "author_id" => DumbHax(msg.author.id),
+            "author_avatar" => msg.author.avatar,
+            "author_is_bot" => msg.author.bot,
+            "author_discriminator" => msg.author.discriminator,
+            "author_name" => msg.author.name,
+            "channel_id" => DumbHax(msg.channel_id),
+            "content" => filtered_content,
+            "content_binary" => if is_filtered { Some(msg.content.as_bytes()) } else { None },
+            "edited_timestamp" => msg.edited_timestamp,
+            "guild_id" => msg.guild_id.map(|gid| DumbHax(gid)),
+            "kind" => message_type_to_string(msg.kind),
+            "member_is_some" => memb.is_some(),
+            "member_deaf" => memb.clone().map(|m| m.deaf),
+            "member_joined_at" => memb.clone().map(|m| m.joined_at),
+            "member_mute" => memb.clone().map(|m| m.mute),
+            "member_roles" => member_roles_arr_id,
+            "mention_everyone" => msg.mention_everyone,
+            "mention_roles" => mention_roles_arr_id,
+            "nonce_debug" => format!("{:?}",msg.nonce),
+            "pinned" => msg.pinned,
+            "timestamp" => msg.timestamp,
+            "tts" => msg.tts,
+            "webhook_id" => msg.webhook_id.map(|whid| DumbHax(whid)),
+            "archive_recvd_at" => recvd_at,
         )?;
 
         let message_rowid = tx.last_insert_rowid();
@@ -445,7 +417,7 @@ archive_recvd_at
     fn grab_archive<'a>(_: Context, rdy: Ready) -> Result<(), CetrizineError<'a>> {
         let func_start = chrono::offset::Local::now();
         let mut conn = make_conn();
-        //TODO: insert some tuple for the ready
+
         let tx = conn.transaction()?;
         insert_helper!(
             tx, "ready",
@@ -499,50 +471,29 @@ archive_recvd_at
 
             let tx = conn.transaction()?;
 
-            tx.execute("INSERT INTO guild (
-ready_rowid,
-discord_id,
-afk_channel_id,
-afk_timeout,
-application_id,
-default_message_notification_level,
-explicit_content_filter,
-features,
-icon,
-joined_at,
-large,
-member_count,
-mfa_level,
-name,
-owner_id,
-region,
-splash,
-system_channel_id,
-verification_level,
-archive_recvd_at ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                       &[
-                           &ready_rowid as &ToSql,
-                           &SmartHax(guild.id) as &ToSql, //discord_id,
-                           &SmartHax(guild.afk_channel_id), //afk_channel_id,
-                           &(guild.afk_timeout as i64), //afk_timeout,
-                           &SmartHax(guild.application_id), //application_id,
-                           &guild.default_message_notifications.into_str(),//default_message_notification_level,
-                           &guild.explicit_content_filter.into_str(),//explicit_content_filter,
-                           &guild.features.join(","),//features,
-                           &guild.icon,//icon,
-                           &guild.joined_at,//joined_at,
-                           &guild.large,//large,
-                           &(guild.member_count as i64),//member_count,
-                           &guild.mfa_level.into_str(),//mfa_level,
-                           &guild.name,//name,
-                           &SmartHax(guild.owner_id),//owner_id,
-                           &guild.region,//region,
-                           &guild.splash,//splash,
-                           &SmartHax(guild.system_channel_id),//system_channel_id,
-                           &guild.verification_level.into_str(),//verification_level,
-                           &func_start,//archive_recvd_at
-                       ]
-            )?;
+            insert_helper!(
+                tx, "guild",
+                "ready_rowid" => ready_rowid, 
+                "discord_id" => SmartHax(guild.id), 
+                "afk_channel_id" => SmartHax(guild.afk_channel_id), 
+                "afk_timeout" => (guild.afk_timeout as i64), 
+                "application_id" => SmartHax(guild.application_id), 
+                "default_message_notification_level" => guild.default_message_notifications.into_str(),
+                "explicit_content_filter" => guild.explicit_content_filter.into_str(),
+                "features" => guild.features.join(","),
+                "icon" => guild.icon,
+                "joined_at" => guild.joined_at,
+                "large" => guild.large,
+                "member_count" => (guild.member_count as i64),
+                "mfa_level" => guild.mfa_level.into_str(),
+                "name" => guild.name,
+                "owner_id" => SmartHax(guild.owner_id),
+                "region" => guild.region,
+                "splash" => guild.splash,
+                "system_channel_id" => SmartHax(guild.system_channel_id),
+                "verification_level" => guild.verification_level.into_str(),
+                "archive_recvd_at" => func_start,
+            )?;            
 
             let guild_rowid = tx.last_insert_rowid();
 
@@ -551,36 +502,22 @@ archive_recvd_at ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             //channels
             for (_id, chan_a_lock) in &guild.channels {
                 let chan = chan_a_lock.read();
-                tx.execute("INSERT INTO guild_channel (
-discord_id,
-guild_rowid,
-guild_id,
-bitrate,
-category_id,
-kind,
-last_message_id,
-last_pin_timestamp,
-name,
-position,
-topic,
-user_limit,
-nsfw
-) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                           &[
-                               &SmartHax(chan.id) as &ToSql,
-                               &guild_rowid,//guild_rowid,
-                               &SmartHax(chan.guild_id),//guild_id,
-                               &chan.bitrate.map(|b| b as i64),//bitrate,
-                               &SmartHax(chan.category_id),//category_id,
-                               &chan.kind.into_str(),//kind,
-                               &SmartHax(chan.last_message_id),//last_message_id,
-                               &chan.last_pin_timestamp,//last_pin_timestamp,
-                               &chan.name,//name,
-                               &chan.position,//position,
-                               &chan.topic,//topic,
-                               &chan.user_limit.map(|u| u as i64),//user_limit,
-                               &chan.nsfw,//nsfw
-                           ]
+
+                insert_helper!(
+                    tx, "guild_channel",
+                    "discord_id" => SmartHax(chan.id),
+                    "guild_rowid" => guild_rowid,
+                    "guild_id" => SmartHax(chan.guild_id),
+                    "bitrate" => chan.bitrate.map(|b| b as i64),
+                    "category_id" => SmartHax(chan.category_id),
+                    "kind" => chan.kind.into_str(),
+                    "last_message_id" => SmartHax(chan.last_message_id),
+                    "last_pin_timestamp" => chan.last_pin_timestamp,
+                    "name" => chan.name,
+                    "position" => chan.position,
+                    "topic" => chan.topic,
+                    "user_limit" => chan.user_limit.map(|u| u as i64),
+                    "nsfw" => chan.nsfw,
                 )?;
 
                 let chan_rowid = tx.last_insert_rowid();
@@ -594,27 +531,20 @@ nsfw
                         Role(rid) => ("Role", rid.0),
                     };
 
-                    tx.execute("INSERT INTO permission_overwrite (
-guild_channel_rowid,
-allow_bits,
-deny_bits,
-permission_overwrite_type,
-permission_overwrite_id
-) VALUES (?,?,?,?,?)",
-                               &[
-                                   &chan_rowid as &ToSql,
-                                   &PermsToSql(overwrite.allow),
-                                   &PermsToSql(overwrite.deny),
-                                   &ov_type_str,
-                                   &(ov_id as i64),
-                               ]
+                    insert_helper!(
+                        tx, "permission_overwrite",
+                        "guild_channel_rowid" => chan_rowid,
+                        "allow_bits" => PermsToSql(overwrite.allow),
+                        "deny_bits" => PermsToSql(overwrite.deny),
+                        "permission_overwrite_type" => ov_type_str,
+                        "permission_overwrite_id" => (ov_id as i64),
                     )?;
                 }
             }
 
             //emojis
             for (_, emoji) in &guild.emojis {
-                tx.execute(
+                /*tx.execute(
                     "INSERT INTO id_arr (row_id) VALUES (null)",
                     NO_PARAMS
                 )?;
@@ -629,32 +559,24 @@ permission_overwrite_id
                             &DumbHax(role_id.clone()),
                         ]
                     )?;
-                }
+                }*/
+                let id_arr_rowid = make_arr(&tx, &emoji.roles)?;
 
-                tx.execute("INSERT INTO emoji (
-discord_id,
-guild_rowid,
-animated,
-name,
-managed,
-require_colons,
-roles
-) VALUES (?,?,?,?,?,?,?)",
-                           &[
-                               &SmartHax(emoji.id) as &ToSql,//discord_id,
-                               &guild_rowid,//guild_rowid,
-                               &emoji.animated,//animated,
-                               &emoji.name,//name,
-                               &emoji.managed,//managed,
-                               &emoji.require_colons,//require_colons,
-                               &id_arr_rowid,//roles
-                           ]
+                insert_helper!(
+                    tx, "emoji",
+                    "discord_id" => SmartHax(emoji.id),
+                    "guild_rowid" => guild_rowid,
+                    "animated" => emoji.animated,
+                    "name" => emoji.name,
+                    "managed" => emoji.managed,
+                    "require_colons" => emoji.require_colons,
+                    "roles" => id_arr_rowid,
                 )?;
             }
 
             //members
             for (_, member) in &guild.members {
-                tx.execute(
+                /*tx.execute(
                     "INSERT INTO id_arr (row_id) VALUES (null)",
                     NO_PARAMS
                 )?;
@@ -669,39 +591,27 @@ roles
                             &DumbHax(role_id.clone()),
                         ]
                     )?;
-                }
+                }*/
+                let id_arr_rowid = make_arr(&tx, &member.roles)?;
 
                 let user = member.user.read();
 
-                tx.execute("INSERT INTO member (
-guild_rowid,
-deaf,
-guild_id,
-joined_at,
-mute,
-nick,
-roles,
-user_id,
-user_avatar,
-user_is_bot,
-user_discriminator,
-user_name
-) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-                           &[
-                               &guild_rowid as &ToSql,
-                               &member.deaf,
-                               &SmartHax(member.guild_id),
-                               &member.joined_at,
-                               &member.mute,
-                               &member.nick,
-                               &id_arr_rowid,
-                               &SmartHax(user.id),
-                               &user.avatar,
-                               &user.bot,
-                               &user.discriminator,
-                               &user.name,
-                           ]
+                insert_helper!(
+                    tx, "member",
+                    "guild_rowid" => guild_rowid,
+                    "deaf" => member.deaf,
+                    "guild_id" => SmartHax(member.guild_id),
+                    "joined_at" => member.joined_at,
+                    "mute" => member.mute,
+                    "nick" => member.nick,
+                    "roles" => id_arr_rowid,
+                    "user_id" => SmartHax(user.id),
+                    "user_avatar" => user.avatar,
+                    "user_is_bot" => user.bot,
+                    "user_discriminator" => user.discriminator,
+                    "user_name" => user.name,
                 )?;
+
             }
 
             //presences
@@ -719,86 +629,39 @@ user_name
                     "status" => presence.status.into_str(),
                     "user_id" => SmartHax(presence.user_id),
                 )?;
-                /*tx.execute("INSERT INTO user_presence (
-ready_rowid,
-guild_rowid,
-game_is_some,
-game_type,
-game_name,
-game_url,
-last_modified,
-nick,
-status,
-user_id
-) VALUES (?,?,?,?,?,?,?,?,?,?)",
-                           &[
-                               &(None as Option<i64>) as &ToSql,
-                               &guild_rowid as &ToSql, //guild_rowid
-                               &presence.game.is_some(), //game_is_some
-                               &presence.game.clone().map(|g| g.kind.into_str()), //game_type
-                               &presence.game.clone().map(|g| g.name), //game_name
-                               &presence.game.clone().map(|g| g.url), //game_url
-                               &presence.last_modified.map(|v| v as i64),
-                               &presence.nick,
-                               &presence.status.into_str(),
-                               &SmartHax(presence.user_id),
-                           ]
-                )?;*/
             }
 
             //roles
             for (_, role) in &guild.roles {
-                tx.execute("INSERT INTO guild_role (
-discord_id,
-guild_rowid,
-colour_u32,
-hoist,
-managed,
-mentionable,
-name,
-permission_bits,
-position
-) VALUES (?,?,?,?,?,?,?,?,?)",
-                           &[
-                               &SmartHax(role.id) as &ToSql, //discord_id
-                               &guild_rowid, //guild_rowid
-                               &role.colour.0, //colour_u32
-                               &role.hoist,
-                               &role.managed,
-                               &role.mentionable,
-                               &role.name,
-                               &PermsToSql(role.permissions),
-                               &role.position
-                           ]
+
+                insert_helper!(
+                    tx, "guild_role",
+                    "discord_id" => SmartHax(role.id), 
+                    "guild_rowid" => guild_rowid, 
+                    "colour_u32" => role.colour.0, 
+                    "hoist" => role.hoist,
+                    "managed" => role.managed,
+                    "mentionable" => role.mentionable,
+                    "name" => role.name,
+                    "permissions_bits" => PermsToSql(role.permissions),
+                    "position" => role.position,
                 )?;
             }
 
             //voice_states
             for (_, voice_state) in &guild.voice_states {
-                tx.execute("INSERT INTO voice_state (
-guild_rowid,
-channel_id,
-deaf,
-mute,
-self_deaf,
-self_mute,
-session_id,
-suppress,
-token,
-user_id
-) VALUES (?,?,?,?,?,?,?,?,?,?)",
-                           &[
-                               &guild_rowid as &ToSql,
-                               &SmartHax(voice_state.channel_id),
-                               &voice_state.deaf,
-                               &voice_state.mute,
-                               &voice_state.self_deaf,
-                               &voice_state.self_mute,
-                               &voice_state.session_id,
-                               &voice_state.suppress,
-                               &voice_state.token,
-                               &SmartHax(voice_state.user_id),
-                           ]
+                insert_helper!(
+                    tx, "voice_state",
+                    "guild_rowid" => guild_rowid,
+                    "channel_id" => SmartHax(voice_state.channel_id),
+                    "deaf" => voice_state.deaf,
+                    "mute" => voice_state.mute,
+                    "self_deaf" => voice_state.self_deaf,
+                    "self_mute" => voice_state.self_mute,
+                    "session_id" => voice_state.session_id,
+                    "suppress" => voice_state.suppress,
+                    "token" => voice_state.token,
+                    "user_id" => SmartHax(voice_state.user_id),
                 )?;
             }
                                
@@ -1003,7 +866,7 @@ fn main() {
         .expect("Expected a token in the environment")
         .to_owned();
 
-    let conn = make_conn();
+    let mut conn = make_conn();
     //conn.execute("PRAGMA foreign_keys = ON;").unwrap();
 
 
@@ -1059,7 +922,7 @@ reaction_is_custom int not null, --bool
 --if reaction is custom:
 reaction_animated int, --bool
 reaction_id int,
-reaction_name text
+reaction_name text,
 
 --else
 reaction_string text
@@ -1297,7 +1160,34 @@ received_live int not null --bool
     conn.execute("CREATE INDEX IF NOT EXISTS mag_start_plain ON message_archive_gets(start_message_id)", NO_PARAMS).unwrap();
     conn.execute("CREATE INDEX IF NOT EXISTS mag_start_plain ON message_archive_gets(end_message_id)", NO_PARAMS).unwrap();
 
+    conn.execute("CREATE TABLE migration_version (version int)", NO_PARAMS).unwrap();
 
+    let mut version:i64= -1;
+
+    while version < 1 {
+        version = conn.query_row(
+            "SELECT version FROM migration_version",
+            NO_PARAMS,
+            |a| a.get(0)
+        ).optional().unwrap().unwrap_or(-1);
+        let tx = conn.transaction().unwrap();
+        match version {
+            -1 => {
+                tx.execute_batch("INSERT INTO migration_version (version) VALUES (0)").unwrap()
+            },
+            0 => {
+                tx.execute_batch(
+                    "ALTER TABLE messages ADD COLUMN content_binary data;
+UPDATE migration_version SET version = 1;"
+                ).unwrap()
+            },
+            1 => {
+                //nothing to do
+            },
+            _ => panic!("unrecognized migration version"),
+        }
+        tx.commit().unwrap();
+    }
     
     let handler = Handler{conn: Mutex::new(conn)};
     let mut client = Client::new(&token, handler).expect("Err creating client");
