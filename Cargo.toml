@@ -1,6 +1,6 @@
 [package]
-name = "archiver-selfbot"
-version = "0.1.0"
+name = "cetrizine"
+version = "0.2.0"
 authors = ["Shelvacu <shelvacu@gmail.com>"]
 edition = "2018"
 

@@ -19,16 +19,6 @@ version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 
 [[package]]
-name = "archiver-selfbot"
-version = "0.1.0"
-dependencies = [
- "chrono 0.4.6 (registry+https://github.com/rust-lang/crates.io-index)",
- "rusqlite 0.17.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "serenity 0.5.13",
- "time 0.1.42 (registry+https://github.com/rust-lang/crates.io-index)",
-]
-
-[[package]]
 name = "autocfg"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -78,6 +68,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 name = "cc"
 version = "1.0.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
+
+[[package]]
+name = "cetrizine"
+version = "0.2.0"
+dependencies = [
+ "chrono 0.4.6 (registry+https://github.com/rust-lang/crates.io-index)",
+ "rusqlite 0.17.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "serenity 0.5.13",
+ "time 0.1.42 (registry+https://github.com/rust-lang/crates.io-index)",
+]
 
 [[package]]
 name = "cfg-if"

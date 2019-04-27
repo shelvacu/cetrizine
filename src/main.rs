@@ -22,6 +22,7 @@ use serenity::{
 };
 
 struct Handler{
+    //TODO: I'm pretty sure serenity multithreads by default, this should really be a connection pool.
     conn: Mutex<Connection>,
 }
 
@@ -82,7 +83,7 @@ enum_stringify!{ serenity::model::channel::ChannelType => Text, Private, Voice, 
 enum_stringify!{ serenity::model::gateway::GameType => Playing, Streaming, Listening }
 enum_stringify!{ serenity::model::user::OnlineStatus => DoNotDisturb, Idle, Invisible, Offline, Online }
 
-fn get_name(chan:serenity::model::channel::Channel) -> String {
+fn get_name(chan:&serenity::model::channel::Channel) -> String {
     use serenity::model::channel::Channel::*;
     
     match chan {
@@ -102,6 +103,7 @@ pub enum CetrizineError<'a>{
 
 impl<'a> std::fmt::Display for CetrizineError<'a> {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        //TODO: Should maybe do this differently, probably delegate to sub-errors' fmt()?
         write!(f, "{:?}", self)
     }
 }
@@ -109,6 +111,7 @@ impl<'a> std::fmt::Display for CetrizineError<'a> {
 impl<'a> std::error::Error for CetrizineError<'a> {
     fn description(&self) -> &str {
         use CetrizineError::*;
+        //TODO: Include sub-errors' description? Does that happen already?
         match self {
             Mutex(_)    => "Mutex poisoned",
             Sql(_)      => "SQLite Error",
@@ -119,8 +122,8 @@ impl<'a> std::error::Error for CetrizineError<'a> {
     fn cause(&self) -> Option<&std::error::Error> {
         use CetrizineError::*;
         match self {
-            Mutex(e) => Some(e),
-            Sql(e)   => Some(e),
+            Mutex(e)    => Some(e),
+            Sql(e)      => Some(e),
             Serenity(e) => Some(e),
         }
     }
@@ -168,12 +171,6 @@ macro_rules! snowflake_impl {
                 self.0
             }
         }
-
-        /*impl ToSql for $klass{
-            fn to_sql(&self) -> sqlite::Result<ToSqlOutput> {
-                Ok(ToSqlOutput::Owned(sqlite::types::Value::Integer(self.get_snowflake_i64())))
-            }
-        }*/
     };
 }
 
@@ -211,8 +208,8 @@ pub struct PermsToSql(pub serenity::model::permissions::Permissions);
 impl ToSql for PermsToSql{
     fn to_sql(&self) -> sqlite::Result<ToSqlOutput> {
         let val_u:u64 = self.0.bits();
+        //TODO: Do I *really* need unsafe here? Is this platform-independent? (probably not) (also see below)
         let val_i:i64 = unsafe { std::mem::transmute(val_u) };
-        //(val_i.clone()).to_sql()
         Ok(ToSqlOutput::Owned(sqlite::types::Value::Integer(val_i)))
     }
 }
@@ -220,13 +217,14 @@ impl ToSql for PermsToSql{
 impl FromSql for PermsToSql{
     fn column_result(value: ValueRef) -> FromSqlResult<Self> {
         i64::column_result(value).map(|val_i| {
+            //TODO: see above
             let val_u:u64 = unsafe { std::mem::transmute(val_i) };
             Self(serenity::model::permissions::Permissions::from_bits_truncate(val_u))
         })
     }
 }
 
-fn make_arr<'a, T: Clone + Into<u64>>(tx: &sqlite::Transaction, arr: &[T]) -> Result<i64, CetrizineError<'a>> {
+fn make_arr<T: Clone + Into<u64>>(tx: &sqlite::Transaction, arr: &[T]) -> Result<i64, sqlite::Error> {
     tx.execute(
         "INSERT INTO id_arr (row_id) VALUES (null)",
         NO_PARAMS
@@ -249,13 +247,14 @@ impl Handler {
     fn archive_message<'a>(tx: &sqlite::Transaction, msg: &Message, recvd_at:chrono::DateTime<chrono::offset::Local>) -> Result<(), CetrizineError<'a>> {
         let memb = &msg.member;
 
+        //let member_roles_arr_id = memb.map(|m| make_arr(tx, &m.roles)?); <-- This doesn't work because the '?' is inside the closure and thus the closure's return type would be a Result<...> which would make member_roles_arr_id a Option<Result<...>> which is no bueno, so I did the below instead
         let member_roles_arr_id = match memb {
             Some(m) => Some(make_arr(tx, &m.roles)?),
             None => None,
         };
         
         let mention_roles_arr_id = make_arr(tx, &msg.mention_roles)?;
-        
+
         let mut filtered_content = msg.content.clone();
         filtered_content.retain(|c| c != '\0');
         let is_filtered = filtered_content != msg.content;
@@ -280,7 +279,7 @@ impl Handler {
             "member_roles" => member_roles_arr_id,
             "mention_everyone" => msg.mention_everyone,
             "mention_roles" => mention_roles_arr_id,
-            "nonce_debug" => format!("{:?}",msg.nonce),
+            "nonce_debug" => format!("{:?}",msg.nonce), //TODO: should probably file a bug and/or pull request with serenity about this one
             "pinned" => msg.pinned,
             "timestamp" => msg.timestamp,
             "tts" => msg.tts,
@@ -295,7 +294,7 @@ impl Handler {
             insert_helper!(
                 tx, "attachment",
                 "message_rowid" => message_rowid,
-                "discord_id" => attachment.id.parse::<i64>().expect("could not parse attachment discord id"),
+                "discord_id" => attachment.id.parse::<i64>().expect("could not parse attachment discord id"), //Yes, attachment.id is a String when all the other .id's are a u64 wrapper
                 "filename" => attachment.filename,
                 "height" => attachment.height.map(|h| h as i64),
                 "width" => attachment.width.map(|w| w as i64),
@@ -386,9 +385,11 @@ impl Handler {
                 "count" => (reaction.count as i64),
                 "me" => reaction.me,
                 "reaction_is_custom" => is_custom,
+                
                 "reaction_animated" => animated,
                 "reaction_id" => SmartHax(id.map(|i| i.clone())),
                 "reaction_name" => name,
+                
                 "reaction_string" => string,
             )?;
         }
@@ -396,10 +397,10 @@ impl Handler {
         Ok(())
     }
     
-    /// This func assumes it's already in its own thread, and will block until complete
+    /// This fn will block until it appears that all previous messages have been retrieved. This should probably be run in another thread.
     fn grab_archive<'a>(_: Context, rdy: Ready) -> Result<(), CetrizineError<'a>> {
         let func_start = chrono::offset::Local::now();
-        let mut conn = make_conn();
+        let mut conn = make_conn()?;
 
         let tx = conn.transaction()?;
         insert_helper!(
@@ -797,7 +798,7 @@ received_live
             println!("NOGUILD");
         }
         let mut conn = self.conn.lock()?;
-        println!("CHAN: {:?}", msg.channel_id.to_channel().map(|c| get_name(c)));
+        println!("CHAN: {:?}", msg.channel_id.to_channel().map(|c| get_name(&c)));
         println!("USR: {:?}#{}", msg.author.name, msg.author.discriminator);
         println!("MSG: {:?}", msg.content);
 
@@ -833,14 +834,14 @@ impl EventHandler for Handler {
     }
 }
 
-fn make_conn() -> Connection {
-    let conn = Connection::open("messages2-blarg.db").expect("couldnt open connection");
+fn make_conn() -> Result<Connection, sqlite::Error> {
+    let conn = Connection::open("messages2-blarg.db")?;//.expect("couldnt open connection");
     conn.set_db_config(
         sqlite::config::DbConfig::SQLITE_DBCONFIG_ENABLE_FKEY,
         true,
-    ).expect("could not set db config to enable foreign keys");
+    )?;//.expect("could not set db config to enable foreign keys");
 
-    return conn;
+    return Ok(conn);
 }
 
 fn main() {
@@ -849,9 +850,7 @@ fn main() {
         .expect("Expected a token in the environment")
         .to_owned();
 
-    let mut conn = make_conn();
-    //conn.execute("PRAGMA foreign_keys = ON;").unwrap();
-
+    let mut conn = make_conn().expect("could not establish database connection");
 
     conn.execute("CREATE TABLE IF NOT EXISTS message (
 rowid integer primary key autoincrement,
@@ -968,8 +967,7 @@ video_is_some int not null, --bool
 video_height int,
 video_width int,
 video_url text
-)
-", NO_PARAMS).unwrap();
+)", NO_PARAMS).unwrap();
 
     conn.execute("CREATE TABLE IF NOT EXISTS embed_field (
 rowid integer primary key autoincrement,
@@ -1143,9 +1141,9 @@ received_live int not null --bool
     conn.execute("CREATE INDEX IF NOT EXISTS mag_start_plain ON message_archive_gets(start_message_id)", NO_PARAMS).unwrap();
     conn.execute("CREATE INDEX IF NOT EXISTS mag_start_plain ON message_archive_gets(end_message_id)", NO_PARAMS).unwrap();
 
-    conn.execute("CREATE TABLE migration_version (version int)", NO_PARAMS).unwrap();
+    conn.execute("CREATE TABLE IF NOT EXISTS migration_version (version int)", NO_PARAMS).unwrap();
 
-    let mut version:i64= -1;
+    let mut version:i64 = -1;
 
     while version < 1 {
         version = conn.query_row(
@@ -1160,7 +1158,7 @@ received_live int not null --bool
             },
             0 => {
                 tx.execute_batch(
-                    "ALTER TABLE messages ADD COLUMN content_binary data;
+                    "ALTER TABLE message ADD COLUMN content_binary data;
 UPDATE migration_version SET version = 1;"
                 ).unwrap()
             },
