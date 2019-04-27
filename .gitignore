@@ -2,3 +2,5 @@
 **/*.rs.bk
 *.db
 *.db.old
+*.db-journal
+*.db-wal
