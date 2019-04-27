@@ -1,5 +1,5 @@
 #![feature(type_alias_enum_variants)]
-//#![error(unused_must_use)] TODO: make these warnings into errors
+#![deny(unused_must_use)]
 
 extern crate serenity;
 extern crate rusqlite as sqlite;
@@ -411,19 +411,22 @@ impl Handler {
     fn grab_channel_archive<'a>(conn: &mut sqlite::Connection, chan: &Channel, guild_name: String) -> Result<(), CetrizineError<'a>> {
         let name = get_name(chan);
         println!("ARCHIVING CHAN {} (id {})", &name, &chan.id());
+        let mut got_messages = false;
 
         let last_msg_id = match get_last_message_id(chan) {
             Some(id) => id,
             None => return Ok(()),
         };
 
-        let mut maybe_res:Option<(u64,Option<u64>)> = conn.query_row(
-            "SELECT start_message_id,after_message_id FROM message_archive_gets WHERE ( start_message_id <= ?1 AND ?1 <= end_message_id )
+        println!("DEBUG: selecting maybe_res WHERE start >= {} >= end AND chan = {}",last_msg_id,chan.id());
+        let mut maybe_res:Option<(u64,Option<u64>,bool)> = conn.query_row(
+            "SELECT end_message_id,after_message_id,(message_count_received < message_count_requested) FROM message_archive_gets WHERE start_message_id >= ?1 AND ?1 >= end_message_id AND channel_id = ?2
 ORDER BY end_message_id ASC LIMIT 1;",
-            &[&SmartHax(last_msg_id) as &ToSql],
-            |r| Ok((r.get::<_,i64>(0)? as u64,r.get::<_,Option<i64>>(1)?.map(|i| i as u64)))
+            &[&SmartHax(last_msg_id) as &ToSql, &SmartHax(chan.id())],
+            |r| Ok((r.get::<_,i64>(0)? as u64,r.get::<_,Option<i64>>(1)?.map(|i| i as u64),r.get(2)?))
         ).optional()?;
-
+        println!("maybe_res is {:?}",maybe_res);
+        //std::process::exit(1);
         let mut get_before = DISCORD_MAX_SNOWFLAKE;
         //let before_id:u64 = last_msg_id.into();
         let mut before_message_id:Option<u64>;// = Some(before_id.to_string());
@@ -431,22 +434,29 @@ ORDER BY end_message_id ASC LIMIT 1;",
         while let Some(res) = maybe_res {
             get_before = res.0;//.get::<_,String>(0).parse::<u64>().unwrap(); //49
             before_message_id = res.1;//.get::<_,Option<String>>(1); //null
-
+            if res.2 {
+                return Ok(());
+            }
+            println!("DEBUG: selecting maybe_res again");
             maybe_res = conn.query_row(
-                "SELECT start_message_id,after_message_id FROM message_archive_gets WHERE ( start_message_id < ?1 AND ?1 <= end_message_id ) OR
-before_message_id = ?1 OR
-(?2 NOT NULL AND end_message_id = ?2)
+                "SELECT end_message_id,after_message_id,(message_count_received < message_count_requested) FROM message_archive_gets WHERE (
+  ( start_message_id > ?1 AND ?1 >= end_message_id ) OR
+  before_message_id = ?1 OR
+  (?2 NOT NULL AND end_message_id = ?2)
+) AND channel_id = ?3
 ORDER BY start_message_id ASC LIMIT 1;",
-                &[&(get_before as i64) as &ToSql,&(before_message_id.map(|u| u as i64))],
-                |r| Ok((r.get::<_,i64>(0)? as u64,r.get::<_,Option<i64>>(1)?.map(|i| i as u64)))
+                &[&(get_before as i64) as &ToSql,&(before_message_id.map(|u| u as i64)),&SmartHax(chan.id())],
+                |r| Ok((r.get::<_,i64>(0)? as u64,r.get::<_,Option<i64>>(1)?.map(|i| i as u64),r.get(2)?))
             ).optional()?;
+            println!("maybe_res is {:?}",maybe_res);
         }
 
         //we're "in" a gap, lets find where this gap ends.
 
+        println!("DEBUG: selecting gap_end");
         let gap_end = conn.query_row(
-            "SELECT end_message_id FROM message_archive_gets WHERE end_message_id < ?1 ORDER BY start_message_id ASC LIMIT 1;",
-            &[&(get_before as i64) as &ToSql],
+            "SELECT end_message_id FROM message_archive_gets WHERE end_message_id < ?1 AND channel_id = ?2 ORDER BY start_message_id ASC LIMIT 1;",
+            &[&(get_before as i64) as &ToSql, &SmartHax(chan.id())],
             |r| r.get(0)
         ).optional()?.unwrap_or(0i64);
 
@@ -468,6 +478,7 @@ ORDER BY start_message_id ASC LIMIT 1;",
                 Self::archive_message(&tx, msg, recvd_at)?;
             }
             if msgs.len() == 0 { break }
+            got_messages = true;
             let first_msg = msgs.first().expect("im a bad");
             let last_msg  = msgs.last().expect("im a bad");
             //TODO: put channel_rowid in there somwhere
@@ -491,9 +502,11 @@ ORDER BY start_message_id ASC LIMIT 1;",
             );
             earliest_message_recvd = last_msg.id.into();
         } //while earliest_message_recvd > gap_end {
-        //TODO: We've either come to the end of messages in this channel,
-        // or the end of this gap. if it's the latter, we should continue.
-        Ok(())
+        if got_messages {
+            return Self::grab_channel_archive(conn, chan, guild_name);
+        } else {
+            Ok(())
+        }
     }
     
     /// This func assumes it's already in its own thread, and will block until complete
@@ -548,7 +561,7 @@ ORDER BY start_message_id ASC LIMIT 1;",
                 Group(group_lock) => {
                     let group = group_lock.read();
                     insert_helper!(
-                        tx, "group",
+                        tx, "group_channel",
                         "discord_id" => SmartHax(group.channel_id),
                         "ready_rowid" => ready_rowid,
                         "icon" => group.icon,
@@ -565,7 +578,7 @@ ORDER BY start_message_id ASC LIMIT 1;",
                         insert_helper!(
                             tx, "group_user",
                             "discord_id" => SmartHax(user.id),
-                            "group_rowid" => group_rowid,
+                            "group_channel_rowid" => group_rowid,
                             "avatar" => user.avatar,
                             "bot" => user.bot,
                             "discriminator" => user.discriminator,
@@ -1446,7 +1459,7 @@ UPDATE migration_version SET version = 2;
             },
             2 => {
                 tx.execute_batch("
-CREATE TABLE group (
+CREATE TABLE group_channel (
 rowid integer primary key autoincrement,
 discord_id int not null,
 ready_rowid int REFERENCES ready(rowid),
@@ -1459,7 +1472,7 @@ owner_id int not null
 CREATE TABLE group_user (
 rowid integer primary key autoincrement,
 discord_id int not null,
-group_rowid int not null REFERENCES group(rowid),
+group_channel_rowid int not null REFERENCES group_channel(rowid),
 avatar text,
 bot int not null, --bool
 discriminator int not null,
@@ -1482,7 +1495,16 @@ recipient_name text not null
 UPDATE migration_version SET version = 3;
 ").expect("Failed migration 2=>3")
             },
-            3 => {},
+            3 => {
+                tx.execute_batch("
+CREATE INDEX mag_channel_start  ON message_archive_gets(channel_id, start_message_id);
+CREATE INDEX mag_channel_end    ON message_archive_gets(channel_id,   end_message_id);
+CREATE INDEX mag_channel_after  ON message_archive_gets(channel_id, after_message_id);
+CREATE INDEX mag_channel_before ON message_archive_gets(channel_id,before_message_id);
+UPDATE migration_version SET version = 4;
+").expect("Failed migration 3=>4");
+            },
+            4 => {},
             _ => panic!("unrecognized migration version"),
         }
         tx.commit().unwrap();
