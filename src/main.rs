@@ -66,14 +66,30 @@ impl ToSql for NullEscape<String>{
     }
 }
 
-impl ToSql for NullEscape<Option<String>>{
+impl ToSql for NullEscape<Option<String>> {
     fn to_sql(&self) -> sqlite::Result<ToSqlOutput> {
-        match self {
-            None => None.to_sql(),
+        match self.0 {
+            None => Ok(sqlite::types::ToSqlOutput::Owned(sqlite::types::Value::Null)),
             Some(s) => NullEscape(s).to_sql(),
         }
     }
 }
+
+trait FilterExt {
+    fn filter(&self) -> NullEscape;
+}
+
+impl FilterExt for str {
+    fn filter(&self) -> NullEscape {
+        NullEscape(self.into())
+    }
+}
+
+/*impl FilterExt for String {
+    fn filter(&self) -> NullEscape {
+        NullEscape(self.clone())
+    }
+}*/
 
 impl ConnectionExtension for sqlite::Connection {
     fn execute_auto_retry(&self, sql: &str, params: &[&ToSql]) -> sqlite::Result<usize> {
@@ -226,10 +242,19 @@ impl<'a> From<serenity::Error> for CetrizineError<'a> {
 
 pub struct DumbHax<T>(pub T);
 
-impl<T: Clone + Into<u64>> ToSql for DumbHax<T>{
+impl<T: Clone + Snowflake> ToSql for DumbHax<T>{
     fn to_sql(&self) -> sqlite::Result<ToSqlOutput> {
-        let val:u64 = self.0.clone().into();
+        let val:u64 = self.0.clone().get_snowflake();
         Ok(ToSqlOutput::from(format!("{}",val)))
+    }
+}
+
+impl<T: Clone + Snowflake> ToSql for DumbHax<Option<T>>{
+    fn to_sql(&self) -> sqlite::Result<ToSqlOutput> {
+        match self.0 {
+            None => Ok(sqlite::types::ToSqlOutput::Owned(sqlite::types::Value::Null)),
+            Some(v) => DumbHax(v).to_sql(),
+        }
     }
 }
 
@@ -301,7 +326,7 @@ impl FromSql for PermsToSql{
     }
 }
 
-fn make_arr<T: Clone + Into<u64>>(tx: &sqlite::Transaction, arr: &[T]) -> Result<i64, sqlite::Error> {
+fn make_arr<T: Clone + Snowflake>(tx: &sqlite::Transaction, arr: &[T]) -> Result<i64, sqlite::Error> {
     tx.execute(
         "INSERT INTO id_arr (row_id) VALUES (null)",
         NO_PARAMS
@@ -449,9 +474,9 @@ impl Handler {
 
         //reactions
         for reaction in &msg.reactions {
-            let (is_custom, animated, id, name, string) = match &reaction.reaction_type {
+            let (is_custom, animated, id, name, string) = match reaction.reaction_type.clone() {
                 serenity::model::channel::ReactionType::Custom{animated, id, name} =>
-                    (true, Some(animated), Some(id), Some(name), None),
+                    (true, Some(animated), Some(id), name, None),
                 serenity::model::channel::ReactionType::Unicode(s) =>
                     (false, None, None, None, Some(s)),
             };
