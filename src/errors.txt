@@ -45,3 +45,16 @@ stack backtrace:
   10: <cetrizine::Handler as serenity::client::event_handler::EventHandler>::ready::{{closure}}
              at src/main.rs:916
 
+
+http response: Response { status: InternalServerError, headers: Headers { Date: Fri, 03 May 2019 04:36:46 GMT
+, Content-Type: application/json
+, Content-Length: 52
+, Connection: keep-alive
+, Set-Cookie: __cfduid=XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX; expires=Sat, 02-May-20 04:36:36 GMT; path=/; domain=.discordapp.com; HttpOnly
+, Via: 1.1 google
+, Alt-Svc: clear
+, Expect-CT: max-age=604800, report-uri="https://report-uri.cloudflare.com/cdn-cgi/beacon/expect-ct"
+, Server: cloudflare
+, CF-RAY: XXXXXXXXXXXXXXXX-XXX
+, }, version: Http11, url: "https://discordapp.com/api/v6/channels/XXXXXXXXXXXXXXXXXX/messages?limit=100&before=XXXXXXXXXXXXXXXXXX", status_raw: RawStatus(500, "INTERNAL SERVER ERROR"), message: Http11Message { is_proxied: false, method: None, stream: Wrapper { obj: Some(Reading(SizedReader(remaining=52))) } } }
+body: "{\"code\": 0, \"message\": \"500: Internal Server Error\"}"

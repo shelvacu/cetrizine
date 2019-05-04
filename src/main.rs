@@ -17,7 +17,8 @@ const DISCORD_MAX_SNOWFLAKE:u64 = 9223372036854775807;
 
 use serenity::{
     model::{gateway::Ready, channel::Message, channel::Channel},
-    model::id::*,
+    model::prelude::*,
+    //model::id::*,
     prelude::*,
 };
 
@@ -66,22 +67,68 @@ impl ToSql for NullEscape<String>{
     }
 }
 
-impl ToSql for NullEscape<Option<String>> {
+/*impl ToSql for NullEscape<Option<String>> {
     fn to_sql(&self) -> sqlite::Result<ToSqlOutput> {
-        match self.0 {
+        match &self.0 {
             None => Ok(sqlite::types::ToSqlOutput::Owned(sqlite::types::Value::Null)),
-            Some(s) => NullEscape(s).to_sql(),
+            Some(s) => NullEscape(s.clone()).to_sql(),
+        }
+    }
+}*/
+
+trait OptionExt {
+    type Inner;
+    fn collapse(self) -> Option<Self::Inner>;
+}
+
+impl<T> OptionExt for Option<Option<T>> {
+    type Inner = T;
+    fn collapse(self) -> Option<Self::Inner> {
+        match self {
+            None => None,
+            Some(None) => None,
+            Some(Some(inner)) => Some(inner),
         }
     }
 }
 
 trait FilterExt {
-    fn filter(&self) -> NullEscape;
+    type Return;
+    fn filter_null(&self) -> Self::Return;
 }
 
 impl FilterExt for str {
-    fn filter(&self) -> NullEscape {
+    type Return = NullEscape<String>;
+    fn filter_null(&self) -> Self::Return {
         NullEscape(self.into())
+    }
+}
+
+/*impl<T: FilterExt> FilterExt for Option<T> {
+    type Return = Option<NullEscape<String>>;
+    fn filter_null(&self) -> Self::Return {
+        self.map(|t| t.filter_null())
+    }
+}*/
+
+impl FilterExt for Option<&str> {
+    type Return = Option<NullEscape<String>>;
+    fn filter_null(&self) -> Self::Return {
+        self.map(FilterExt::filter_null)
+    }
+}
+
+impl FilterExt for Option<String> {
+    type Return = Option<NullEscape<String>>;
+    fn filter_null(&self) -> Self::Return {
+        self.clone().map(|s| s.filter_null())
+    }
+}
+
+impl FilterExt for Option<Option<String>> {
+    type Return = Option<NullEscape<String>>;
+    fn filter_null(&self) -> Self::Return {
+        self.clone().collapse().filter_null()
     }
 }
 
@@ -111,6 +158,15 @@ impl ConnectionExtension for sqlite::Connection {
         }
         return res
     }
+}
+
+macro_rules! print_any_error {
+    ( $e:expr ) => {{
+        match $e {
+            Ok(_) => (),
+            Err(e) => eprintln!("ERROR in {}:{} {:?}",file!(),line!(),e),
+        }
+    }};
 }
 
 macro_rules! insert_helper {
@@ -251,9 +307,9 @@ impl<T: Clone + Snowflake> ToSql for DumbHax<T>{
 
 impl<T: Clone + Snowflake> ToSql for DumbHax<Option<T>>{
     fn to_sql(&self) -> sqlite::Result<ToSqlOutput> {
-        match self.0 {
+        match &self.0 {
             None => Ok(sqlite::types::ToSqlOutput::Owned(sqlite::types::Value::Null)),
-            Some(v) => DumbHax(v).to_sql(),
+            Some(v) => Ok(ToSqlOutput::from(format!("{}", v.clone().get_snowflake()))),//DumbHax(v).to_sql(),
         }
     }
 }
@@ -364,10 +420,10 @@ impl Handler {
             tx, "message",
             "discord_id" => DumbHax(msg.id),
             "author_id" => DumbHax(msg.author.id),
-            "author_avatar" => NullEscape(msg.author.avatar),
+            "author_avatar" => msg.author.avatar.filter_null(),
             "author_is_bot" => msg.author.bot,
             "author_discriminator" => msg.author.discriminator,
-            "author_name" => NullEscape(msg.author.name),
+            "author_name" => msg.author.name.filter_null(),
             "channel_id" => DumbHax(msg.channel_id),
             "content" => filtered_content,
             "content_binary" => if is_filtered { Some(msg.content.as_bytes()) } else { None },
@@ -397,12 +453,12 @@ impl Handler {
                 tx, "attachment",
                 "message_rowid" => message_rowid,
                 "discord_id" => attachment.id.parse::<i64>().expect("could not parse attachment discord id"), //Yes, attachment.id is a String when all the other .id's are a u64 wrapper
-                "filename" => NullEscape(attachment.filename),
+                "filename" => attachment.filename.filter_null(),
                 "height" => attachment.height.map(|h| h as i64),
                 "width" => attachment.width.map(|w| w as i64),
                 "proxy_url" => attachment.proxy_url,
                 "size" => (attachment.size as i64),
-                "url" => NullEscape(attachment.url),
+                "url" => attachment.url.filter_null(),
             )?;
         }
 
@@ -412,37 +468,37 @@ impl Handler {
                 tx, "embed",
                 "message_rowid" => message_rowid,
                 "author_is_some" => embed.author.is_some(),
-                "author_icon_url" => embed.author.clone().map(|a| NullEscape(a.icon_url)),
-                "author_name" => embed.author.clone().map(|a| NullEscape(a.name)),
-                "author_proxy_icon_url" => embed.author.clone().map(|a| NullEscape(a.proxy_icon_url)),
-                "author_url" => embed.author.clone().map(|a| NullEscape(a.url)),
+                "author_icon_url" => embed.author.clone().map(|a| a.icon_url).filter_null(),
+                "author_name" => embed.author.clone().map(|a| a.name).filter_null(),
+                "author_proxy_icon_url" => embed.author.clone().map(|a| a.proxy_icon_url).filter_null(),
+                "author_url" => embed.author.clone().map(|a| a.url).filter_null(),
                 "colour_u32" => embed.colour.0,
-                "description" => NullEscape(embed.description),
+                "description" => embed.description.filter_null(),
                 "footer_is_some" => embed.footer.is_some(),
-                "footer_icon_url" => embed.footer.clone().map(|f| NullEscape(f.icon_url)),
-                "footer_proxy_icon_url" => embed.footer.clone().map(|f| NullEscape(f.proxy_icon_url)),
-                "footer_text" => embed.footer.clone().map(|f| NullEscape(f.text)),
+                "footer_icon_url" => embed.footer.clone().map(|f| f.icon_url).filter_null(),
+                "footer_proxy_icon_url" => embed.footer.clone().map(|f| f.proxy_icon_url).filter_null(),
+                "footer_text" => embed.footer.clone().map(|f| f.text).filter_null(),
                 "image_is_some" => embed.image.is_some(),
                 "image_height" => embed.image.clone().map(|i| i.height as i64),
                 "image_width" => embed.image.clone().map(|i| i.width as i64),
-                "image_proxy_url" => embed.image.clone().map(|i| NullEscape(i.proxy_url)),
-                "image_url" => embed.image.clone().map(|i| NullEscape(i.url)),
+                "image_proxy_url" => embed.image.clone().map(|i| i.proxy_url).filter_null(),
+                "image_url" => embed.image.clone().map(|i| i.url).filter_null(),
                 "kind" => embed.kind,
                 "provider_is_some" => embed.provider.is_some(),
-                "provider_name" => embed.provider.clone().map(|p| NullEscape(p.name)),
-                "provider_url" => embed.provider.clone().map(|p| NullEscape(p.url)),
+                "provider_name" => embed.provider.clone().map(|p| p.name).filter_null(),
+                "provider_url" => embed.provider.clone().map(|p| p.url).filter_null(),
                 "thumbnail_is_some" => embed.thumbnail.is_some(),
                 "thumbnail_height" => embed.thumbnail.clone().map(|t| t.height as i64),
                 "thumbnail_width" => embed.thumbnail.clone().map(|t| t.width as i64),
-                "thumbnail_url" => embed.thumbnail.clone().map(|t| NullEscape(t.url)),
-                "thumbnail_proxy_url" => embed.thumbnail.clone().map(|t| NullEscape(t.proxy_url)),
+                "thumbnail_url" => embed.thumbnail.clone().map(|t| t.url).filter_null(),
+                "thumbnail_proxy_url" => embed.thumbnail.clone().map(|t| t.proxy_url).filter_null(),
                 "timestamp" => embed.timestamp,
-                "title" => NullEscape(embed.title),
-                "url" => NullEscape(embed.url),
+                "title" => embed.title.filter_null(),
+                "url" => embed.url.filter_null(),
                 "video_is_some" => embed.video.is_some(),
                 "video_height" => embed.video.clone().map(|v| v.height as i64),
                 "video_width" => embed.video.clone().map(|v| v.width as i64),
-                "video_url" => embed.video.clone().map(|v| NullEscape(v.url)),
+                "video_url" => embed.video.clone().map(|v| v.url).filter_null(),
             )?;
 
             let embed_rowid = tx.last_insert_rowid();
@@ -453,8 +509,8 @@ impl Handler {
                     tx, "embed_field",
                     "embed_rowid" => embed_rowid,
                     "inline" => embed_field.inline,
-                    "name"  => NullEscape(embed_field.name),
-                    "value" => NullEscape(embed_field.value),
+                    "name"  => embed_field.name.filter_null(),
+                    "value" => embed_field.value.filter_null(),
                 )?;
             }
         }
@@ -465,10 +521,10 @@ impl Handler {
                 tx, "user_mention",
                 "message_rowid" => message_rowid,
                 "id" => SmartHax(user.id),
-                "avatar" => NullEscape(user.avatar),
+                "avatar" => user.avatar.filter_null(),
                 "bot" => user.bot,
                 "discriminator" => user.discriminator,
-                "name" => NullEscape(user.name),
+                "name" => user.name.filter_null(),
             )?;
         }
 
@@ -490,9 +546,9 @@ impl Handler {
                 
                 "reaction_animated" => animated,
                 "reaction_id" => SmartHax(id.map(|i| i.clone())),
-                "reaction_name" => NullEscape(name),
+                "reaction_name" => name.filter_null(),
                 
-                "reaction_string" => NullEscape(string),
+                "reaction_string" => string.filter_null(),
             )?;
         }
         
@@ -510,11 +566,26 @@ impl Handler {
         };
 
         //println!("DEBUG: selecting maybe_res WHERE start >= {} >= end AND chan = {}",last_msg_id,chan.id());
-        let mut maybe_res:Option<(u64,Option<u64>,bool)> = conn.query_row(
-            "SELECT end_message_id,after_message_id,(message_count_received < message_count_requested) FROM message_archive_gets WHERE ((start_message_id >= ?1 AND ?1 >= end_message_id) OR around_message_id = ?1) AND channel_id = ?2
-ORDER BY end_message_id ASC LIMIT 1;",
+        let mut maybe_res:Option<(i64,u64,Option<u64>,bool)> = conn.query_row("
+SELECT
+  rowid,
+  end_message_id,
+  after_message_id,
+  (message_count_received < message_count_requested) 
+FROM message_archive_gets 
+WHERE 
+  (
+    (
+      start_message_id >= ?1 AND ?1 >= end_message_id
+    ) OR 
+    around_message_id = ?1
+  ) 
+  AND 
+  channel_id = ?2
+ORDER BY end_message_id ASC
+LIMIT 1;",
             &[&SmartHax(last_msg_id) as &ToSql, &SmartHax(chan.id())],
-            |r| Ok((r.get::<_,i64>(0)? as u64,r.get::<_,Option<i64>>(1)?.map(|i| i as u64),r.get(2)?))
+            |r| Ok((r.get(0)?,r.get::<_,i64>(1)? as u64,r.get::<_,Option<i64>>(2)?.map(|i| i as u64),r.get(3)?))
         ).optional()?;
         //println!("maybe_res is {:?}",maybe_res);
         //std::process::exit(1);
@@ -523,35 +594,35 @@ ORDER BY end_message_id ASC LIMIT 1;",
         let mut before_message_id:Option<u64>;// = Some(before_id.to_string());
         
         while let Some(res) = maybe_res {
-            get_before = res.0;//.get::<_,String>(0).parse::<u64>().unwrap(); //49
-            before_message_id = res.1;//.get::<_,Option<String>>(1); //null
-            if res.2 {
+            get_before = res.1;//.get::<_,String>(0).parse::<u64>().unwrap(); //49
+            before_message_id = res.2;//.get::<_,Option<String>>(1); //null
+            if res.3 {
                 return Ok(());
             }
-            //println!("DEBUG: selecting maybe_res again");
+            //println!("DEBUG: selecting maybe_res again get_before {} before_message_id {:?} res.0 {}",get_before,before_message_id,res.0);
             maybe_res = conn.query_row(
-                "SELECT end_message_id,after_message_id,(message_count_received < message_count_requested) FROM message_archive_gets WHERE (
-  ( start_message_id > ?1 AND ?1 >= end_message_id ) OR
+                "SELECT rowid,end_message_id,after_message_id,(message_count_received < message_count_requested) FROM message_archive_gets WHERE (
+  ( start_message_id >= ?1 AND ?1 > end_message_id ) OR
   before_message_id = ?1 OR
   (?2 NOT NULL AND end_message_id = ?2)
-) AND channel_id = ?3
+) AND channel_id = ?3 AND rowid != ?4
 ORDER BY start_message_id ASC LIMIT 1;",
-                &[&(get_before as i64) as &ToSql,&(before_message_id.map(|u| u as i64)),&SmartHax(chan.id())],
-                |r| Ok((r.get::<_,i64>(0)? as u64,r.get::<_,Option<i64>>(1)?.map(|i| i as u64),r.get(2)?))
+                &[&(get_before as i64) as &ToSql,&(before_message_id.map(|u| u as i64)),&SmartHax(chan.id()),&res.0],
+                |r| Ok((r.get(0)?,r.get::<_,i64>(1)? as u64,r.get::<_,Option<i64>>(2)?.map(|i| i as u64),r.get(3)?))
             ).optional()?;
-            //println!("maybe_res is {:?}",maybe_res);
+            //println!("maybe_res again is {:?}",maybe_res);
         }
 
         //we're "in" a gap, lets find where this gap ends.
 
-        //println!("DEBUG: selecting gap_end where end < {} and chan = {}",get_before,chan.id());
+        println!("DEBUG: selecting gap_end where end < {} and chan = {}",get_before,chan.id());
         let gap_end = conn.query_row(
-            "SELECT start_message_id FROM message_archive_gets WHERE end_message_id < ?1 AND channel_id = ?2 ORDER BY start_message_id ASC LIMIT 1;",
+            "SELECT start_message_id FROM message_archive_gets WHERE end_message_id < ?1 AND channel_id = ?2 ORDER BY start_message_id DESC LIMIT 1;",
             &[&(get_before as i64) as &ToSql, &SmartHax(chan.id())],
             |r| r.get(0)
         ).optional()?.unwrap_or(0i64);
         //println!("DEBUG: gap_end is {:?}",gap_end);
-        let mut earliest_message_recvd = DISCORD_MAX_SNOWFLAKE;
+        let mut earliest_message_recvd = get_before;//DISCORD_MAX_SNOWFLAKE;
 
         while earliest_message_recvd > (gap_end as u64) {
             let asking_for = 100u8;
@@ -580,18 +651,34 @@ ORDER BY start_message_id ASC LIMIT 1;",
                 Self::archive_message(&tx, msg, recvd_at)?;
             }
             if msgs.len() == 0 { break }
-            got_messages = true;
             let first_msg = msgs.first().expect("im a bad");
             let last_msg  = msgs.last().expect("im a bad");
 
             //DEBUG START
-            let we_have_archived_this_before:bool = tx.query_row(
+            /*let we_have_archived_this_before:bool = tx.query_row(
                 "SELECT COUNT(*) FROM message_archive_gets WHERE (start_message_id = ? AND end_message_id = ? AND rowid > 126941)",
                 &[&SmartHax(first_msg.id) as &ToSql,&SmartHax(last_msg.id)],
                 |r| r.get(0)
+            )?;*/
+            let already_archived_start:bool = tx.query_row(
+                "SELECT COUNT(*) FROM message_archive_gets WHERE (start_message_id >= ?1 AND ?1 >= end_message_id) AND channel_id = ?2 AND rowid > 193737",
+                &[&SmartHax(first_msg.id) as &ToSql,&SmartHax(chan.id())],
+                |r| r.get(0)
             )?;
+            let already_archived_end:bool = tx.query_row(
+                "SELECT COUNT(*) FROM message_archive_gets WHERE (start_message_id >= ?1 AND ?1 >= end_message_id) AND channel_id = ?2 AND rowid > 193737",
+                &[&SmartHax(last_msg.id) as &ToSql,&SmartHax(chan.id())],
+                |r| r.get(0)
+            )?;
+            let we_have_archived_this_before = already_archived_start && already_archived_end && (!around || {
+                tx.query_row(
+                    "SELECT COUNT(*) FROM message_archive_gets WHERE (start_message_id >= ?1 AND ?1 >= end_message_id) AND channel_id = ?2 AND rowid > 193737",
+                    &[&SmartHax(last_msg_id) as &ToSql,&SmartHax(chan.id())],
+                    |r| r.get(0)
+            )?
+            });
             if we_have_archived_this_before {
-                panic!(
+                eprintln!(
                     "We've archived this before! chan id {} {} {} start {} end {} in {}#{}",
                     chan.id(),
                     if around {"around"} else {"before"},
@@ -616,6 +703,7 @@ ORDER BY start_message_id ASC LIMIT 1;",
                 "message_count_received" => (msgs.len() as i64),
             )?;
             tx.commit()?;
+            got_messages = true;
             println!(
                 "Archived {} message(s), {} thru {} in {}#{}",
                 msgs.len(),
@@ -627,6 +715,7 @@ ORDER BY start_message_id ASC LIMIT 1;",
             earliest_message_recvd = last_msg.id.into();
         } //while earliest_message_recvd > gap_end {
         if got_messages {
+            //println!("recursing!");
             return Self::grab_channel_archive(conn, chan, guild_name);
         } else {
             Ok(())
@@ -644,14 +733,14 @@ ORDER BY start_message_id ASC LIMIT 1;",
             "session_id" => rdy.session_id,
             "shard_0" => rdy.shard.clone().map(|a| a[0] as i64),
             "shard_1" => rdy.shard.clone().map(|a| a[1] as i64),
-            "trace" => NullEscape(rdy.trace.join(",")),
+            "trace" => rdy.trace.join(",").filter_null(),
             "user_id" => SmartHax(rdy.user.id),
-            "user_avatar" => NullEscape(rdy.user.avatar),
+            "user_avatar" => rdy.user.avatar.filter_null(),
             "user_bot" => rdy.user.bot,
             "user_discriminator" => rdy.user.discriminator,
-            "user_email" => NullEscape(rdy.user.email),
+            "user_email" => rdy.user.email.filter_null(),
             "user_mfa_enabled" => rdy.user.mfa_enabled,
-            "user_name" => NullEscape(rdy.user.name),
+            "user_name" => rdy.user.name.filter_null(),
             "user_verified" => rdy.user.verified,
             "version" => (rdy.version as i64),
         )?;
@@ -666,10 +755,10 @@ ORDER BY start_message_id ASC LIMIT 1;",
                 "guild_rowid" => (None as Option<i64>),
                 "game_is_some" => presence.game.is_some(),
                 "game_type" => presence.game.clone().map(|g| g.kind.into_str()),
-                "game_name" => presence.game.clone().map(|g| NullEscape(g.name)),
-                "game_url" => presence.game.clone().map(|g| NullEscape(g.url)),
+                "game_name" => presence.game.clone().map(|g| g.name).filter_null(),
+                "game_url" => presence.game.clone().map(|g| g.url).filter_null(),
                 "last_modified" => presence.last_modified.map(|v| v as i64),
-                "nick" => NullEscape(presence.nick),
+                "nick" => presence.nick.filter_null(),
                 "status" => presence.status.into_str(),
                 "user_id" => SmartHax(presence.user_id),
             )?;
@@ -688,10 +777,10 @@ ORDER BY start_message_id ASC LIMIT 1;",
                         tx, "group_channel",
                         "discord_id" => SmartHax(group.channel_id),
                         "ready_rowid" => ready_rowid,
-                        "icon" => NullEscape(group.icon),
+                        "icon" => group.icon.filter_null(),
                         "last_message_id" => SmartHax(group.last_message_id),
                         "last_pin_timestamp" => group.last_pin_timestamp,
-                        "name" => NullEscape(group.name),
+                        "name" => group.name.filter_null(),
                         "owner_id" => SmartHax(group.owner_id),
                     )?;
 
@@ -703,10 +792,10 @@ ORDER BY start_message_id ASC LIMIT 1;",
                             tx, "group_user",
                             "discord_id" => SmartHax(user.id),
                             "group_channel_rowid" => group_rowid,
-                            "avatar" => NullEscape(user.avatar),
+                            "avatar" => user.avatar.filter_null(),
                             "bot" => user.bot,
                             "discriminator" => user.discriminator,
-                            "name" => NullEscape(user.name),
+                            "name" => user.name.filter_null(),
                         )?;
                     }
 
@@ -723,10 +812,10 @@ ORDER BY start_message_id ASC LIMIT 1;",
                         "last_pin_timestamp" => chan.last_pin_timestamp,
                         "kind" => chan.kind.into_str(),
                         "recipient_id" => SmartHax(user.id),
-                        "recipient_avatar" => NullEscape(user.avatar),
+                        "recipient_avatar" => user.avatar.filter_null(),
                         "recipient_bot" => user.bot,
                         "recipient_discriminator" => user.discriminator,
-                        "recipient_name" => NullEscape(user.name),
+                        "recipient_name" => user.name.filter_null(),
                     )?;
                     private_channels_to_archive.push(chan.id);
                 },
@@ -757,16 +846,16 @@ ORDER BY start_message_id ASC LIMIT 1;",
                 "application_id" => SmartHax(guild.application_id), 
                 "default_message_notification_level" => guild.default_message_notifications.into_str(),
                 "explicit_content_filter" => guild.explicit_content_filter.into_str(),
-                "features" => NullEscape(guild.features.join(",")),
-                "icon" => NullEscape(guild.icon),
+                "features" => guild.features.join(",").filter_null(),
+                "icon" => guild.icon.filter_null(),
                 "joined_at" => guild.joined_at,
                 "large" => guild.large,
                 "member_count" => (guild.member_count as i64),
                 "mfa_level" => guild.mfa_level.into_str(),
-                "name" => NullEscape(guild.name),
+                "name" => guild.name.filter_null(),
                 "owner_id" => SmartHax(guild.owner_id),
-                "region" => NullEscape(guild.region),
-                "splash" => NullEscape(guild.splash),
+                "region" => guild.region.filter_null(),
+                "splash" => guild.splash.filter_null(),
                 "system_channel_id" => SmartHax(guild.system_channel_id),
                 "verification_level" => guild.verification_level.into_str(),
                 "archive_recvd_at" => func_start,
@@ -790,9 +879,9 @@ ORDER BY start_message_id ASC LIMIT 1;",
                     "kind" => chan.kind.into_str(),
                     "last_message_id" => SmartHax(chan.last_message_id),
                     "last_pin_timestamp" => chan.last_pin_timestamp,
-                    "name" => NullEscape(chan.name),
+                    "name" => chan.name.filter_null(),
                     "position" => chan.position,
-                    "topic" => NullEscape(chan.topic),
+                    "topic" => chan.topic.filter_null(),
                     "user_limit" => chan.user_limit.map(|u| u as i64),
                     "nsfw" => chan.nsfw,
                 )?;
@@ -828,7 +917,7 @@ ORDER BY start_message_id ASC LIMIT 1;",
                     "discord_id" => SmartHax(emoji.id),
                     "guild_rowid" => guild_rowid,
                     "animated" => emoji.animated,
-                    "name" => NullEscape(emoji.name),
+                    "name" => emoji.name.filter_null(),
                     "managed" => emoji.managed,
                     "require_colons" => emoji.require_colons,
                     "roles" => id_arr_rowid,
@@ -848,13 +937,13 @@ ORDER BY start_message_id ASC LIMIT 1;",
                     "guild_id" => SmartHax(member.guild_id),
                     "joined_at" => member.joined_at,
                     "mute" => member.mute,
-                    "nick" => NullEscape(member.nick),
+                    "nick" => member.nick.filter_null(),
                     "roles" => id_arr_rowid,
                     "user_id" => SmartHax(user.id),
-                    "user_avatar" => NullEscape(user.avatar),
+                    "user_avatar" => user.avatar.filter_null(),
                     "user_is_bot" => user.bot,
                     "user_discriminator" => user.discriminator,
-                    "user_name" => NullEscape(user.name),
+                    "user_name" => user.name.filter_null(),
                 )?;
 
             }
@@ -867,10 +956,10 @@ ORDER BY start_message_id ASC LIMIT 1;",
                     "guild_rowid" => guild_rowid, //guild_rowid
                     "game_is_some" => presence.game.is_some(), //game_is_some
                     "game_type" => presence.game.clone().map(|g| g.kind.into_str()), //game_type
-                    "game_name" => presence.game.clone().map(|g| NullEscape(g.name)), //game_name
-                    "game_url" => presence.game.clone().map(|g| NullEscape(g.url)), //game_url
+                    "game_name" => presence.game.clone().map(|g| g.name).filter_null(), //game_name
+                    "game_url" => presence.game.clone().map(|g| g.url).filter_null(), //game_url
                     "last_modified" => presence.last_modified.map(|v| v as i64),
-                    "nick" => NullEscape(presence.nick),
+                    "nick" => presence.nick.filter_null(),
                     "status" => presence.status.into_str(),
                     "user_id" => SmartHax(presence.user_id),
                 )?;
@@ -887,7 +976,7 @@ ORDER BY start_message_id ASC LIMIT 1;",
                     "hoist" => role.hoist,
                     "managed" => role.managed,
                     "mentionable" => role.mentionable,
-                    "name" => NullEscape(role.name),
+                    "name" => role.name.filter_null(),
                     "permissions_bits" => PermsToSql(role.permissions),
                     "position" => role.position,
                 )?;
@@ -905,7 +994,7 @@ ORDER BY start_message_id ASC LIMIT 1;",
                     "self_mute" => voice_state.self_mute,
                     "session_id" => voice_state.session_id,
                     "suppress" => voice_state.suppress,
-                    "token" => NullEscape(voice_state.token),
+                    "token" => voice_state.token.filter_null(),
                     "user_id" => SmartHax(voice_state.user_id),
                 )?;
             }
@@ -948,6 +1037,7 @@ ORDER BY start_message_id ASC LIMIT 1;",
     
     fn message_result(&self, _: Context, msg: Message) -> Result<(), CetrizineError> {
         let handler_start = chrono::prelude::Local::now();
+        let mut conn = self.conn.lock()?;
         if let Some(guild_id) = msg.guild_id {
             if let Some(guild) = guild_id.to_guild_cached() {
                 println!("GNAME: {}", guild.read().name);
@@ -960,7 +1050,6 @@ ORDER BY start_message_id ASC LIMIT 1;",
         } else {
             println!("NOGUILD");
         }
-        let mut conn = self.conn.lock()?;
         println!("CHAN: {:?}", msg.channel_id.to_channel_cached().map(|c| get_name(&c)));
         println!("USR: {:?}#{}", msg.author.name, msg.author.discriminator);
         println!("MSG: {:?}", msg.content);
@@ -972,6 +1061,50 @@ ORDER BY start_message_id ASC LIMIT 1;",
         println!();
         Ok(())
     }
+
+    fn _channel_create(&self, _ctx: Context, channel_lock: Arc<RwLock<GuildChannel>>) -> Result<(), CetrizineError> {
+        let recvd_at = chrono::offset::Local::now();
+        let mut conn = self.conn.lock()?;
+        let chan = channel_lock.read();
+        println!("Chan create! {:?}", chan.name);
+        let tx = conn.transaction()?;
+        insert_helper!(
+            tx, "channel_create_event",
+            "recvd_at" => recvd_at,
+        )?;
+
+        let cce_rowid = tx.last_insert_rowid();
+
+        insert_helper!(
+            tx, "guild_channel",
+            "discord_id" => SmartHax(chan.id),
+            "channel_create_event_rowid" => cce_rowid,
+            "guild_id" => SmartHax(chan.guild_id),
+            "bitrate" => chan.bitrate.map(|b| b as i64),
+            "category_id" => SmartHax(chan.category_id),
+            "kind" => chan.kind.into_str(),
+            "last_message_id" => SmartHax(chan.last_message_id),
+            "last_pin_timestamp" => chan.last_pin_timestamp,
+            "name" => chan.name.filter_null(),
+            "position" => chan.position,
+            "topic" => chan.topic.filter_null(),
+            "user_limit" => chan.user_limit.map(|u| u as i64),
+            "nsfw" => chan.nsfw,
+        )?;
+        tx.commit()?;
+
+        let guild_name:String = match chan.guild_id.to_guild_cached() {
+            Some(guild_lock) => guild_lock.read().name.clone(),
+            None => "NOT IN CACHE".into(),
+        };
+        let mut threads_conn = make_conn()?;
+        std::mem::drop(chan);
+        let threads_chan = Channel::Guild(channel_lock);
+        std::thread::spawn(move || {
+            print_any_error!(Self::grab_channel_archive(&mut threads_conn, &threads_chan, guild_name));
+        });
+        Ok(())
+    }   
 }   
 
 impl EventHandler for Handler {
@@ -1008,11 +1141,12 @@ impl EventHandler for Handler {
     }
 
     fn message(&self, ctx: Context, msg: Message) {
+        //if true { return }
+        print_any_error!(self.message_result(ctx, msg));
+    }
 
-        match self.message_result(ctx, msg) {
-            Ok(()) => (),
-            Err(e) => eprintln!("ERROR: {:?}", e),
-        }
+    fn channel_create(&self, ctx: Context, channel: Arc<RwLock<GuildChannel>>) {
+        print_any_error!(self._channel_create(ctx, channel));
     }
 }
 
@@ -1321,7 +1455,7 @@ message_count_received int not null,
 received_live int not null --bool
 )", NO_PARAMS).unwrap();
 
-    conn.execute("CREATE INDEX IF NOT EXISTS mag_start ON message_archive_gets (substr('00000000000000000000'||start_message_id, -20, 20))", NO_PARAMS).unwrap();
+    conn.execute("CREATE INDEX IF NOT EXISTS mag_ ON message_archive_gets (substr('00000000000000000000'||start_message_id, -20, 20))", NO_PARAMS).unwrap();
     conn.execute("CREATE INDEX IF NOT EXISTS mag_end   ON message_archive_gets (substr('00000000000000000000'||  end_message_id, -20, 20))", NO_PARAMS).unwrap();
     //conn.execute("CREATE INDEX IF NOT EXISTS mag_start_plain ON message_archive_gets(start_message_id)", NO_PARAMS).unwrap();
     //conn.execute("CREATE INDEX IF NOT EXISTS mag_end_plain ON message_archive_gets(end_message_id)", NO_PARAMS).unwrap();
@@ -1693,7 +1827,57 @@ token = REPLACE(token,'$','$$');
 UPDATE migration_version SET version = 5;
 ").expect("Failed migration 4=>5");
             },
-            5 => {},
+            5 => {
+                /*tx.execute_batch("
+CREATE TABLE channel_create_event (
+rowid integer primary key autoincrement,
+recvd_at text not null --datetime
+);
+
+CREATE TABLE guild_channel_bak (
+rowid integer primary key autoincrement,
+discord_id int not null,
+guild_rowid int REFERENCES guild(rowid), --possibly null
+guild_id int not null,
+bitrate int,
+category_id int,
+kind text not null,
+last_message_id int,
+last_pin_timestamp text, --datetime
+name text not null,
+--permission overwrites
+position int not null, --can be negative!
+topic text,
+user_limit int,
+nsfw int not null --bool
+);
+INSERT INTO guild_channel_bak SELECT * FROM guild_channel;
+DROP TABLE guild_channel;
+CREATE TABLE guild_channel (
+rowid integer primary key autoincrement,
+discord_id int not null,
+guild_rowid int REFERENCES guild(rowid), --possibly null
+channel_create_event_rowid int UNIQUE REFERENCES channel_create_event(rowid), --possibly null
+guild_id int not null,
+bitrate int,
+category_id int,
+kind text not null,
+last_message_id int,
+last_pin_timestamp text, --datetime
+name text not null,
+--permission overwrites
+position int not null, --can be negative!
+topic text,
+user_limit int,
+nsfw int not null --bool
+);
+INSERT INTO guild_channel SELECT rowid, discord_id, guild_rowid, NULL, guild_id, bitrate, category_id, kind, last_message_id, last_pin_timestamp, name, position, topic, user_limit, nsfw FROM guild_channel_bak;
+
+
+UPDATE migration_version SET version = 6;
+").unwrap();*/
+            },
+            //6 => {},
             _ => panic!("unrecognized migration version"),
         }
         tx.commit().unwrap();
