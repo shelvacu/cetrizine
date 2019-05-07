@@ -1001,11 +1001,6 @@ ORDER BY start_message_id ASC LIMIT 1;",
                                
 
             tx.commit()?;
-            private_channels_to_archive.sort_unstable_by_key(|p| p.0);
-            for chan_id in &private_channels_to_archive {
-                Self::grab_channel_archive(&mut conn, &chan_id.to_channel_cached().expect("channel absolutely should be cached"),String::from(""))?;
-            }
-            
             //for (chan_id, chan) in guild.id.channels()? {
             for (chan_id, _chan_rowid) in guild_channels {
                 let cell = &guild.channels[&chan_id];
@@ -1031,6 +1026,11 @@ ORDER BY start_message_id ASC LIMIT 1;",
                 )?;
             } // for (chan_id, chan) in guild.id.channels()? {
         } //for guild_status in &rdy.guilds {
+        private_channels_to_archive.sort_unstable_by_key(|p| p.0);
+        for chan_id in &private_channels_to_archive {
+            Self::grab_channel_archive(&mut conn, &chan_id.to_channel_cached().expect("channel absolutely should be cached"),String::from(""))?;
+        }
+        
         println!("FINISHed archiving old messages");
         Ok(())
     } //fn grab_archive ...
@@ -1051,6 +1051,7 @@ ORDER BY start_message_id ASC LIMIT 1;",
             println!("NOGUILD");
         }
         println!("CHAN: {:?}", msg.channel_id.to_channel_cached().map(|c| get_name(&c)));
+        println!("DATE: {:?}", handler_start);
         println!("USR: {:?}#{}", msg.author.name, msg.author.discriminator);
         println!("MSG: {:?}", msg.content);
 
