@@ -107,13 +107,20 @@ macro_rules! migrate_table {
         println!("{:?}", &sql_columns);
         let sqlite_select_str = format!("SELECT {} FROM {}",sql_columns.join(","),stringify!($table_name));
         let mut sqlite_select_stmt = $sql_conn.prepare_cached(&sqlite_select_str).unwrap();
+
+        let pg_column_names = __mt_pg_column_names!("",$($token)*).flatten();
+        let question_marks = std::iter::repeat("?").take(pg_column_names.len()).collect::<Vec<&str>().join(",");
+        let postgres_insert_str = format!("INSERT INTO {} ({}) VALUES ({})",$table_name,pg_column_names.join(","),question_marks)
+        
         let count_str = format!("SELECT COUNT(*) FROM {}",stringify!($table_name));
         let count:i64 = $sql_conn.query_row(&count_str,NO_PARAMS,|r| r.get(0)).unwrap();
         println!("{} rows",count);
 
-        let mut rows = sqlite_select_stmt.query(NO_PARAMS).unwrap();
 
-        while let Some(row) = rows.next().unwrap() {
+        println!("pg insert str {:?}", postgres_insert_str);
+        //let mut rows = sqlite_select_stmt.query(NO_PARAMS).unwrap();
+
+        //while let Some(row) = rows.next().unwrap() {
             
     }};
 }
