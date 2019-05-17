@@ -1,6 +1,6 @@
 [package]
 name = "cetrizine"
-version = "0.2.0"
+version = "1.0.0-wip"
 authors = ["Shelvacu <shelvacu@gmail.com>"]
 edition = "2018"
 
@@ -8,7 +8,13 @@ edition = "2018"
 serenity = { version = "0.5.13", path = "../serenity/", default-features = true }
 chrono = "*"
 time = "*"
+r2d2_postgres = "*"
+argparse = "~0.2"
 
 [dependencies.rusqlite]
 version = "~0.18.0"
 features = ["chrono","unlock_notify","bundled"]
+
+[dependencies.postgres]
+version = "~0.15.2"
+features = ["with-serde_json","with-time","with-chrono"]
