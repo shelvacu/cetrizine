@@ -1,4 +1,5 @@
 #![feature(type_alias_enum_variants)]
+#![feature(trace_macros)]
 #![deny(unused_must_use)]
 
 extern crate serenity;

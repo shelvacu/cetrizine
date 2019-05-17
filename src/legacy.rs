@@ -5,7 +5,7 @@ use super::sqlite::{NO_PARAMS, OptionalExtension};
 
 #[derive(Debug)]
 enum MTWeirdHack<T> {
-    Arr(Vec<MTWeirdHack>),
+    Arr(Vec<MTWeirdHack<T>>),
     Val(T)
 }
 
@@ -64,6 +64,42 @@ pub fn id_arr(conn:sqlite::Connection, i:i64) -> Vec<i64> {
     ).unwrap().map(Result::unwrap).collect()
 }
 
+macro_rules! __mt_pg_column_names {
+    ( $prefix:expr, $pg_name:ident => $func:ident () -> $ret:ty => !, $($token:tt)* ) => {
+        MTWeirdHack::Arr(vec!(MTWeirdHack::Val(format!("{}{}",$prefix,stringify!($pg_name)).into()), __mt_pg_column_names!($prefix,$($token)*)))
+    };
+    ( $prefix:expr, $pg_name:ident => $conv:ty => !, $($token:tt)* ) => {
+        MTWeirdHack::Arr(vec!(MTWeirdHack::Val(format!("{}{}",$prefix,stringify!($pg_name)).into()), __mt_pg_column_names!($prefix,$($token)*)))
+    };
+    ( $prefix:expr, $pg_name:ident => $func:ident () -> $ret:ty => $sql_name:ident, $($token:tt)* ) => {
+        MTWeirdHack::Arr(vec!(MTWeirdHack::Val(format!("{}{}",$prefix,stringify!($pg_name)).into()), __mt_pg_column_names!($prefix,$($token)*)))
+    };
+    ( $prefix:expr, $pg_name:ident => $conv:ty => $sql_name:ident, $($token:tt)* ) => {
+        MTWeirdHack::Arr(vec!(MTWeirdHack::Val(format!("{}{}",$prefix,stringify!($pg_name)).into()), __mt_pg_column_names!($prefix,$($token)*)))
+    };
+    ( $prefix:expr, $pg_name:ident => $cname:ident $subtree:tt, $($token:tt)* ) => {
+        MTWeirdHack::Arr(vec!(MTWeirdHack::Val(format!("{}{}",$prefix,stringify!($pg_name)).into()), __mt_pg_column_names!($prefix,$($token)*)))
+    };
+    ( $prefix:expr, $pg_name:ident => $cname:ident option $subtree:tt, $($token:tt)* ) => {
+        MTWeirdHack::Arr(
+            vec!(
+                MTWeirdHack::Val(
+                    format!(
+                        "{}{}",
+                        $prefix,
+                        stringify!($pg_name)
+                    ),
+                ),
+                __mt_pg_column_names!(
+                    $prefix,
+                    $($token)*
+                )
+            )
+        )
+    };
+    ($prefix:expr, ) => {MTWeirdHack::Arr(Vec::new())};
+}    
+
 macro_rules! __mt_deconstruct_sql_column_names {
     ( $prefix:expr, { $($token:tt)* } ) => {
         __mt_sql_column_names!($prefix, $($token)*)
@@ -71,74 +107,146 @@ macro_rules! __mt_deconstruct_sql_column_names {
 }
 
 macro_rules! __mt_sql_column_names {
-    /*( $prefix:expr, $pg_name:ident => !, $($token:tt)* ) => {
-        MTWeirdHack::Arr(vec!(MTWeirdHack::Val(format!("{}{}",$prefix,stringify!($pg_name)).into()), __mt_sql_column_names!($prefix,$($token)*)))
-    };
-    ( $prefix:expr, $pg_name:ident => $sql_name:ident, $($token:tt)* ) => {
-        MTWeirdHack::Arr(vec!(MTWeirdHack::Val(format!("{}{}",$prefix,stringify!($sql_name)).into()), __mt_sql_column_names!($prefix,$($token)*)))
-    };*/
-    ( $prefix:expr, $pg_name:ident => $func:ident () => !, $($token:tt)* ) => {
+    ( $prefix:expr, $pg_name:ident => $func:ident () -> $ret:ty => !, $($token:tt)* ) => {
         MTWeirdHack::Arr(vec!(MTWeirdHack::Val(format!("{}{}",$prefix,stringify!($pg_name)).into()), __mt_sql_column_names!($prefix,$($token)*)))
     };
     ( $prefix:expr, $pg_name:ident => $conv:ty => !, $($token:tt)* ) => {
         MTWeirdHack::Arr(vec!(MTWeirdHack::Val(format!("{}{}",$prefix,stringify!($pg_name)).into()), __mt_sql_column_names!($prefix,$($token)*)))
     };
-    ( $prefix:expr, $pg_name:ident => $func:ident () => $sql_name:ident, $($token:tt)* ) => {
+    ( $prefix:expr, $pg_name:ident => $func:ident () -> $ret:ty => $sql_name:ident, $($token:tt)* ) => {
         MTWeirdHack::Arr(vec!(MTWeirdHack::Val(format!("{}{}",$prefix,stringify!($sql_name)).into()), __mt_sql_column_names!($prefix,$($token)*)))
     };
     ( $prefix:expr, $pg_name:ident => $conv:ty => $sql_name:ident, $($token:tt)* ) => {
         MTWeirdHack::Arr(vec!(MTWeirdHack::Val(format!("{}{}",$prefix,stringify!($sql_name)).into()), __mt_sql_column_names!($prefix,$($token)*)))
     };
-    ( $prefix:expr, $pg_name:ident => $subtree:tt, $($token:tt)* ) => {
+    ( $prefix:expr, $pg_name:ident => $cname:ident $subtree:tt, $($token:tt)* ) => {
         MTWeirdHack::Arr(vec!(__mt_deconstruct_sql_column_names!(format!("{}{}_",$prefix,stringify!($pg_name)),$subtree), __mt_sql_column_names!($prefix,$($token)*)))
     };
-    ( $prefix:expr, $pg_name:ident => option $subtree:tt, $($token:tt)* ) => {
+    ( $prefix:expr, $pg_name:ident => $cname:ident option $subtree:tt, $($token:tt)* ) => {
         MTWeirdHack::Arr(vec!(MTWeirdHack::Val(format!("{}{}_is_some ",$prefix,stringify!($pg_name))),__mt_deconstruct_sql_column_names!(format!("{}{}_",$prefix,stringify!($pg_name)),$subtree), __mt_sql_column_names!($prefix,$($token)*)))
     };
     ($prefix:expr, ) => {MTWeirdHack::Arr(Vec::new())};
 }
 
+macro_rules! __mt_struct_attrs {
+    ( $pg_name:ident => $func:ident () -> $ret:ty => !, $($token:tt)* ) => {
+        $pg_name:$ret,
+        __mt_struct_attrs($($token)*)
+    };
+    ( $pg_name:ident => $conv:ty => !, $($token:tt)* ) => {
+        $pg_name:$conv,
+        __mt_struct_attrs($($token)*)
+    };
+    ( $pg_name:ident => $func:ident () -> $ret:ty => $sql_name:ident, $($token:tt)* ) => {
+        $pg_name:$ret,
+        __mt_struct_attrs($($token)*)
+    };
+    ( $pg_name:ident => $conv:ty => $sql_name:ident, $($token:tt)* ) => {
+        $pg_name:$conv,
+        __mt_struct_attrs($($token)*)
+    };
+    ( $pg_name:ident => $cname:ident $subtree:tt, $($token:tt)* ) => {
+        $pg_name:$cname,
+        __mt_struct_attrs($($token)*)
+    };
+    ( $pg_name:ident => $cname:ident option $subtree:tt, $($token:tt)* ) => {
+        $pg_name:Option<$cname>,
+        __mt_struct_attrs($($token)*)
+    };
+    () => {};
+}
+
+macro_rules! __mt_define_types_unwrap {
+    ( ( $($token:tt)* ) ) => { __mt_define_types($($token)*) };
+}
+
+macro_rules! __mt_define_types {
+    ( $pg_name:ident => $func:ident () -> $ret:ty => !, $($token:tt)* ) => {
+        __mt_define_types($($token)*)
+    };
+    ( $pg_name:ident => $conv:ty => !, $($token:tt)* ) => {
+        __mt_define_types($($token)*)
+    };
+    ( $pg_name:ident => $func:ident () -> $ret:ty => $sql_name:ident, $($token:tt)* ) => {
+        __mt_define_types($($token)*)
+    };
+    ( $pg_name:ident => $conv:ty => $sql_name:ident, $($token:tt)* ) => {
+        __mt_define_types($($token)*)
+    };
+    ( $pg_name:ident => $cname:ident $subtree:tt, $($token:tt)* ) => {
+        __mt_define_types_unwrap{$subtree}
+        
+        #[derive(Debug,ToSql)]
+        struct $cname {
+            __mt_struct_attrs($subtree)
+        }
+
+        __mt_define_types($($token)*)
+    };
+    ( $pg_name:ident => $cname:ident option $subtree:tt, $($token:tt)* ) => {
+        __mt_define_types_unwrap{$subtree}
+        
+        #[derive(Debug,ToSql)]
+        struct $cname {
+            __mt_struct_attrs($subtree)
+        }
+
+        __mt_define_types($($token)*)
+    };
+    () => {};
+}
+
+//macro_rules! __mt_values_arr
+
 macro_rules! migrate_table {
     (
         ( $pg_conn:ident, $sql_conn:ident, $table_name:ident ) $( $token:tt )*
     ) => {{
-        println!("Migrating table {}",stringify!($table_name));
+        //__mt_define_types!{$($token)*}
+        let table_name = stringify!($table_name);
+        println!("Migrating table {}",table_name);
         let sql_columns = __mt_sql_column_names!("",$($token)*).flatten();
         println!("{:?}", &sql_columns);
-        let sqlite_select_str = format!("SELECT {} FROM {}",sql_columns.join(","),stringify!($table_name));
+        let sqlite_select_str = format!("SELECT {} FROM {}",sql_columns.join(","),table_name);
         let mut sqlite_select_stmt = $sql_conn.prepare_cached(&sqlite_select_str).unwrap();
 
         let pg_column_names = __mt_pg_column_names!("",$($token)*).flatten();
-        let question_marks = std::iter::repeat("?").take(pg_column_names.len()).collect::<Vec<&str>().join(",");
-        let postgres_insert_str = format!("INSERT INTO {} ({}) VALUES ({})",$table_name,pg_column_names.join(","),question_marks)
+        let question_marks = std::iter::repeat("?").take(pg_column_names.len()).collect::<Vec<&str>>().join(",");
+        let postgres_insert_str = format!("INSERT INTO {} ({}) VALUES ({})",table_name,pg_column_names.join(","),question_marks);
         
-        let count_str = format!("SELECT COUNT(*) FROM {}",stringify!($table_name));
-        let count:i64 = $sql_conn.query_row(&count_str,NO_PARAMS,|r| r.get(0)).unwrap();
-        println!("{} rows",count);
 
 
         println!("pg insert str {:?}", postgres_insert_str);
+
+
+
+
+
+        let count_str = format!("SELECT COUNT(*) FROM {}",table_name);
+        let count:i64 = $sql_conn.query_row(&count_str,NO_PARAMS,|r| r.get(0)).unwrap();
+        println!("{} rows",count);
         //let mut rows = sqlite_select_stmt.query(NO_PARAMS).unwrap();
 
         //while let Some(row) = rows.next().unwrap() {
-            
+        //    __mt_values_arr!(row
     }};
 }
 
 pub fn migrate_sqlite_to_postgres(/*pg_conn: &mut pg::Transaction*/) -> () {
     //TODO: Ensure postgres database is *empty*
-    let mut pg_conn = pg::Connection::connect("postgree://shelvacu@%2Fvar%2Frun%2Fpostgresql:5434/detroit", TlsMode::None).unwrap();
+    let mut pg_conn = pg::Connection::connect("postgres://shelvacu@%2Fvar%2Frun%2Fpostgresql:5434/detroit", TlsMode::None).unwrap();
     let mut pg_trans = pg_conn.transaction().unwrap();
     //let mut pg_conn = pg::Connection::connect("postgres://shelvacu@localhost:5434/detroit", TlsMode::None).unwrap();
     //let sql_conn = 5;
     let mut sql_conn = make_sqlite_connection().expect("could not establish database connection");
 
+    trace_macros!(true);
     migrate_table!{
-        //pg_conn => sql_conn | "message" => !,
+    //__mt_define_types!{
         (pg_trans, sql_conn, message)
         rowid => i64 => !,
         discord_id => i64 => !,
-        author => {
+        author => MTAuthor {
             id => i64 => !,
             avatar => String => !,
             is_bot => bool => !,
@@ -146,18 +254,18 @@ pub fn migrate_sqlite_to_postgres(/*pg_conn: &mut pg::Transaction*/) -> () {
             name => String => !,
         },
         channel_id => i64 => !,
-        content => filter_string() => content_binary,
+        content => filter_string() -> String => content_binary,
         edited_timestamp => Option<chrono::DateTime<chrono::FixedOffset>> => !,
         guild_id => i64 => !,
         kind => String => !,
-        member => option{
+        member => MTMember option{
             deaf => bool => !,
             joined_at => Option<chrono::DateTime<chrono::FixedOffset>> => !,
             mute => bool => !,
-            roles => id_arr() => !,
+            roles => id_arr() -> Vec<i64> => !,
         },
         mention_everyone => bool => !,
-        mention_roles => id_arr() => !,
+        mention_roles => id_arr() -> Vec<i64> => !,
         nonce_debug => String => !,
         pinned => bool => !,
         timestamp => chrono::DateTime<chrono::FixedOffset> => !,
@@ -165,7 +273,8 @@ pub fn migrate_sqlite_to_postgres(/*pg_conn: &mut pg::Transaction*/) -> () {
         webhook_id => Option<i64> => !,
         archive_recvd_at => chrono::DateTime<chrono::FixedOffset> => !,
     }
-
+    trace_macros!(false);
+    
     pg_trans.commit().expect("Failed to commit txn");
     //sql_conn.prepare_cached("SELECT");
 }
