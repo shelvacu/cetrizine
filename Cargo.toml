@@ -10,6 +10,7 @@ chrono = "*"
 time = "*"
 r2d2_postgres = "*"
 argparse = "~0.2"
+postgres-derive = "*"
 
 [dependencies.rusqlite]
 version = "~0.18.0"

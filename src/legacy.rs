@@ -157,8 +157,12 @@ macro_rules! __mt_struct_attrs {
 }
 
 macro_rules! __mt_define_types_unwrap {
-    ( ( $($token:tt)* ) ) => { __mt_define_types($($token)*) };
+    ( { $($token:tt)* } ) => { __mt_define_types($($token)*) };
 }
+
+//https://users.rust-lang.org/t/create-a-struct-from-macro-rules/19829/2
+macro_rules! __mt_define_single_type {
+    
 
 macro_rules! __mt_define_types {
     ( $pg_name:ident => $func:ident () -> $ret:ty => !, $($token:tt)* ) => {
@@ -174,24 +178,24 @@ macro_rules! __mt_define_types {
         __mt_define_types($($token)*)
     };
     ( $pg_name:ident => $cname:ident $subtree:tt, $($token:tt)* ) => {
-        __mt_define_types_unwrap{$subtree}
+        __mt_define_types_unwrap!{$subtree}
         
         #[derive(Debug,ToSql)]
         struct $cname {
-            __mt_struct_attrs($subtree)
+            __mt_struct_attrs!{$subtree}
         }
 
-        __mt_define_types($($token)*)
+        __mt_define_types!($($token)*)
     };
     ( $pg_name:ident => $cname:ident option $subtree:tt, $($token:tt)* ) => {
-        __mt_define_types_unwrap{$subtree}
+        __mt_define_types_unwrap!{$subtree}
         
         #[derive(Debug,ToSql)]
         struct $cname {
-            __mt_struct_attrs($subtree)
+            __mt_struct_attrs!{$subtree}
         }
 
-        __mt_define_types($($token)*)
+        __mt_define_types!($($token)*)
     };
     () => {};
 }
@@ -241,6 +245,12 @@ pub fn migrate_sqlite_to_postgres(/*pg_conn: &mut pg::Transaction*/) -> () {
     let mut sql_conn = make_sqlite_connection().expect("could not establish database connection");
 
     trace_macros!(true);
+    __mt_define_types!{
+        author => Bla {
+            id => i64 => !,
+        },
+    }
+    trace_macros!(false);
     migrate_table!{
     //__mt_define_types!{
         (pg_trans, sql_conn, message)

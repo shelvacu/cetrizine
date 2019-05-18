@@ -5,7 +5,10 @@
 extern crate serenity;
 extern crate rusqlite as sqlite;
 extern crate r2d2_postgres;
+#[macro_use]
 extern crate postgres as pg;
+#[macro_use]
+extern crate postgres_derive;
 extern crate chrono;
 extern crate time;
 
