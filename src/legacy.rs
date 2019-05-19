@@ -162,38 +162,64 @@ macro_rules! __mt_define_types_unwrap {
 
 //https://users.rust-lang.org/t/create-a-struct-from-macro-rules/19829/2
 macro_rules! __mt_define_single_type {
+    ( $outer_type:ty, { $pg_name:ident => $func:ident () -> $ret:ty => !, $($token:tt)* } : { $($name:ident : $klass:ty),* } ) => {
+        __mt_define_single_type!($outer_type,{$($token)*} : {$($name : $klass,) $pg_name : $ret})
+    };
+    ( $outer_type:ty, { $pg_name:ident => $conv:ty => !, $($token:tt)* } : { $($name:ident : $klass:ty),* } ) => {
+        __mt_define_single_type!($outer_type,{$($token)*} : {$($name : $klass,) $pg_name : $conv})
+    };
+    ( $outer_type:ty, { $pg_name:ident => $func:ident () -> $ret:ty => $sql_name:ident, $($token:tt)* } : { $($name:ident : $klass:ty),* } ) => {
+        __mt_define_single_type!($outer_type,{$($token)*} : {$($name : $klass,) $pg_name : $ret})
+    };
+    ( $outer_type:ty, { $pg_name:ident => $conv:ty => $sql_name:ident, $($token:tt)* } : { $($name:ident : $klass:ty),* } ) => {
+        __mt_define_single_type!($outer_type,{$($token)*} : {$($name : $klass,) $pg_name : $conv})
+    };
+    ( $outer_type:ty, { $pg_name:ident => $cname:ident $subtree:tt, $($token:tt)* } : { $($name:ident : $klass:ty),* } ) => {
+        __mt_define_single_type!($outer_type,{$($token)*} : {$($name : $klass,) $pg_name : $cname})
+    };
+    ( $outer_type:ty, { $pg_name:ident => $cname:ident option $subtree:tt, $($token:tt)* } : { $($name:ident : $klass:ty),* } ) => {
+        __mt_define_single_type!($outer_type,{$($token)*} : {$($name : $klass,) $pg_name : Option<$cname>})
+    };
+    ( $outer_type:ty, {} : { $($name:ident : $klass:ty),* } ) => {
+        #[derive(ToSql,Debug)]
+        struct $outer_type {
+            $( $ident : $klass ,)*
+        }
+    };
+}
     
 
 macro_rules! __mt_define_types {
     ( $pg_name:ident => $func:ident () -> $ret:ty => !, $($token:tt)* ) => {
-        __mt_define_types($($token)*)
+        __mt_define_types!($($token)*)
     };
     ( $pg_name:ident => $conv:ty => !, $($token:tt)* ) => {
-        __mt_define_types($($token)*)
+        __mt_define_types!($($token)*)
     };
     ( $pg_name:ident => $func:ident () -> $ret:ty => $sql_name:ident, $($token:tt)* ) => {
-        __mt_define_types($($token)*)
+        __mt_define_types!($($token)*)
     };
     ( $pg_name:ident => $conv:ty => $sql_name:ident, $($token:tt)* ) => {
-        __mt_define_types($($token)*)
+        __mt_define_types!($($token)*)
     };
     ( $pg_name:ident => $cname:ident $subtree:tt, $($token:tt)* ) => {
         __mt_define_types_unwrap!{$subtree}
-        
-        #[derive(Debug,ToSql)]
+
+        __mt_define_single_type!{$cname, $subtree : {}}
+        /*#[derive(Debug,ToSql)]
         struct $cname {
             __mt_struct_attrs!{$subtree}
-        }
+        }*/
 
         __mt_define_types!($($token)*)
     };
     ( $pg_name:ident => $cname:ident option $subtree:tt, $($token:tt)* ) => {
         __mt_define_types_unwrap!{$subtree}
         
-        #[derive(Debug,ToSql)]
+        /*#[derive(Debug,ToSql)]
         struct $cname {
             __mt_struct_attrs!{$subtree}
-        }
+        }*/
 
         __mt_define_types!($($token)*)
     };
@@ -251,7 +277,7 @@ pub fn migrate_sqlite_to_postgres(/*pg_conn: &mut pg::Transaction*/) -> () {
         },
     }
     trace_macros!(false);
-    migrate_table!{
+    /*migrate_table!{
     //__mt_define_types!{
         (pg_trans, sql_conn, message)
         rowid => i64 => !,
@@ -282,7 +308,7 @@ pub fn migrate_sqlite_to_postgres(/*pg_conn: &mut pg::Transaction*/) -> () {
         tts => bool => !,
         webhook_id => Option<i64> => !,
         archive_recvd_at => chrono::DateTime<chrono::FixedOffset> => !,
-    }
+    }*/
     trace_macros!(false);
     
     pg_trans.commit().expect("Failed to commit txn");
