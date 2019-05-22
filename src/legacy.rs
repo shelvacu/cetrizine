@@ -28,8 +28,8 @@ impl<T> MTWeirdHack<T> {
     }
 }
 
-pub fn filter_string(_:sqlite::Connection, v: &[u8]) -> String {
-    let s:String = std::str::from_utf8(v).unwrap().into();
+pub fn filter_string(_:&sqlite::Connection, v: Vec<u8>) -> String {
+    let s:String = std::str::from_utf8(&v).unwrap().into();
     if s.chars().all(|c| c != '\0' && c != '$') {
         s
     } else {
@@ -54,7 +54,7 @@ pub fn filter_string(_:sqlite::Connection, v: &[u8]) -> String {
     }
 }
 
-pub fn id_arr(conn:sqlite::Connection, i:i64) -> Vec<i64> {
+pub fn id_arr(conn:&sqlite::Connection, i:i64) -> Vec<i64> {
     conn.prepare_cached("SELECT id FROM id WHERE id_arr_rowid = ?1").unwrap().query_map(
         &[&i as &sqlite::ToSql],
         |r| {
@@ -62,6 +62,46 @@ pub fn id_arr(conn:sqlite::Connection, i:i64) -> Vec<i64> {
             Ok(i)
         }
     ).unwrap().map(Result::unwrap).collect()
+}
+
+#[derive(Copy,Clone,Debug,FromSql,ToSql)]
+#[postgres(name = "snowflake")]
+pub struct Snowflake(i64);
+
+impl Snowflake {
+    pub fn into_inner(self) -> i64 { self.0 }
+}
+
+impl From<i64> for Snowflake {
+    fn from(i:i64) -> Self{
+        assert!(i >= 0);
+        Self(i)
+    }
+}
+
+impl From<u64> for Snowflake {
+    fn from(u:u64) -> Self{
+        assert!(u <= (std::i64::MAX as u64));
+        Self(u as i64)
+    }
+}
+
+impl From<Snowflake> for i64 {
+    fn from(s:Snowflake) -> Self{
+        s.into_inner()
+    }
+}
+
+pub fn str_sf(_:&sqlite::Connection, t:String) -> Snowflake {
+    t.parse::<i64>().unwrap().into()
+}
+
+pub fn optstr_sf(_:&sqlite::Connection, t:Option<String>) -> Option<Snowflake> {
+    t.map(|v| v.parse::<i64>().unwrap().into())
+}
+
+pub fn int_sf(__:&sqlite::Connection, i:i64) -> Snowflake {
+    i.into()
 }
 
 macro_rules! __mt_pg_column_names {
@@ -157,33 +197,52 @@ macro_rules! __mt_struct_attrs {
 }
 
 macro_rules! __mt_define_types_unwrap {
-    ( { $($token:tt)* } ) => { __mt_define_types($($token)*) };
+    ( { $($token:tt)* } ) => {
+        __mt_define_types!{$($token)*}
+    };
 }
 
 //https://users.rust-lang.org/t/create-a-struct-from-macro-rules/19829/2
 macro_rules! __mt_define_single_type {
-    ( $outer_type:ty, { $pg_name:ident => $func:ident () -> $ret:ty => !, $($token:tt)* } : { $($name:ident : $klass:ty),* } ) => {
-        __mt_define_single_type!($outer_type,{$($token)*} : {$($name : $klass,) $pg_name : $ret})
+    ( $outer_pg_name:ident,$outer_type:ident,$dumbhax:ident, { $pg_name:ident => $func:ident () -> $ret:ty => !, $($token:tt)* } : { $($name:ident : $klass:ty),* } ) => {
+        __mt_define_single_type!($outer_pg_name,$outer_type,$dumbhax,{$($token)*} : {$($name : $klass,)* $pg_name : $ret})
     };
-    ( $outer_type:ty, { $pg_name:ident => $conv:ty => !, $($token:tt)* } : { $($name:ident : $klass:ty),* } ) => {
-        __mt_define_single_type!($outer_type,{$($token)*} : {$($name : $klass,) $pg_name : $conv})
+    ( $outer_pg_name:ident,$outer_type:ident,$dumbhax:ident, { $pg_name:ident => $conv:ty => !, $($token:tt)* } : { $($name:ident : $klass:ty),* } ) => {
+        __mt_define_single_type!($outer_pg_name,$outer_type,$dumbhax,{$($token)*} : {$($name : $klass,)* $pg_name : $conv})
     };
-    ( $outer_type:ty, { $pg_name:ident => $func:ident () -> $ret:ty => $sql_name:ident, $($token:tt)* } : { $($name:ident : $klass:ty),* } ) => {
-        __mt_define_single_type!($outer_type,{$($token)*} : {$($name : $klass,) $pg_name : $ret})
+    ( $outer_pg_name:ident,$outer_type:ident,$dumbhax:ident, { $pg_name:ident => $func:ident () -> $ret:ty => $sql_name:ident, $($token:tt)* } : { $($name:ident : $klass:ty),* } ) => {
+        __mt_define_single_type!($outer_pg_name,$outer_type,$dumbhax,{$($token)*} : {$($name : $klass,)* $pg_name : $ret})
     };
-    ( $outer_type:ty, { $pg_name:ident => $conv:ty => $sql_name:ident, $($token:tt)* } : { $($name:ident : $klass:ty),* } ) => {
-        __mt_define_single_type!($outer_type,{$($token)*} : {$($name : $klass,) $pg_name : $conv})
+    ( $outer_pg_name:ident,$outer_type:ident,$dumbhax:ident, { $pg_name:ident => $conv:ty => $sql_name:ident, $($token:tt)* } : { $($name:ident : $klass:ty),* } ) => {
+        __mt_define_single_type!($outer_pg_name,$outer_type,$dumbhax,{$($token)*} : {$($name : $klass,)* $pg_name : $conv})
     };
-    ( $outer_type:ty, { $pg_name:ident => $cname:ident $subtree:tt, $($token:tt)* } : { $($name:ident : $klass:ty),* } ) => {
-        __mt_define_single_type!($outer_type,{$($token)*} : {$($name : $klass,) $pg_name : $cname})
+    ( $outer_pg_name:ident,$outer_type:ident,$dumbhax:ident, { $pg_name:ident => $cname:ident $subtree:tt, $($token:tt)* } : { $($name:ident : $klass:ty),* } ) => {
+        __mt_define_single_type!($outer_pg_name,$outer_type,$dumbhax,{$($token)*} : {$($name : $klass,)* $pg_name : $cname})
     };
-    ( $outer_type:ty, { $pg_name:ident => $cname:ident option $subtree:tt, $($token:tt)* } : { $($name:ident : $klass:ty),* } ) => {
-        __mt_define_single_type!($outer_type,{$($token)*} : {$($name : $klass,) $pg_name : Option<$cname>})
+    ( $outer_pg_name:ident,$outer_type:ident,$dumbhax:ident, { $pg_name:ident => $cname:ident option $subtree:tt, $($token:tt)* } : { $($name:ident : $klass:ty),* } ) => {
+        __mt_define_single_type!($outer_pg_name,$outer_type,$dumbhax,{$($token)*} : {$($name : $klass,)* $pg_name : Option<$cname>})
     };
-    ( $outer_type:ty, {} : { $($name:ident : $klass:ty),* } ) => {
+    ( $outer_pg_name:ident,$outer_type:ident,$dumbhax:ident, {} : { $($name:ident : $klass:ty),* } ) => {
+        #[derive(Debug,Clone)]
+        pub struct $outer_type {
+            $( $name : $klass ,)*
+        }
+
+        #[allow(non_camel_case_types)]
         #[derive(ToSql,Debug)]
-        struct $outer_type {
-            $( $ident : $klass ,)*
+        #[postgres(name = $outer_type)]
+        struct $dumbhax(pub $outer_type);
+
+        impl pg::types::ToSql for $outer_type {
+            fn to_sql(&self, ty: &pg::types::Type, out: &mut Vec<u8>) -> Result<pg::types::IsNull, Box<dyn std::error::Error + 'static + Sync + Send>> {
+                pg::types::ToSql::to_sql(&$dumbhax(self.clone()), ty, out)
+            }
+
+            fn accepts(ty: &pg::types::Type) -> bool {
+                <$dumbhax as pg::types::ToSql>::accepts(ty)
+            }
+
+            to_sql_checked!{}
         }
     };
 }
@@ -205,7 +264,7 @@ macro_rules! __mt_define_types {
     ( $pg_name:ident => $cname:ident $subtree:tt, $($token:tt)* ) => {
         __mt_define_types_unwrap!{$subtree}
 
-        __mt_define_single_type!{$cname, $subtree : {}}
+        __mt_define_single_type!{$pg_name, $cname, DumbhaxNonOp, $subtree : {}}
         /*#[derive(Debug,ToSql)]
         struct $cname {
             __mt_struct_attrs!{$subtree}
@@ -215,7 +274,8 @@ macro_rules! __mt_define_types {
     };
     ( $pg_name:ident => $cname:ident option $subtree:tt, $($token:tt)* ) => {
         __mt_define_types_unwrap!{$subtree}
-        
+
+        __mt_define_single_type!{$pg_name, $cname, DumbHaxOp, $subtree : {}}
         /*#[derive(Debug,ToSql)]
         struct $cname {
             __mt_struct_attrs!{$subtree}
@@ -226,77 +286,153 @@ macro_rules! __mt_define_types {
     () => {};
 }
 
-//macro_rules! __mt_values_arr
+macro_rules! __mt_c_val {
+    ( $sql_conn:ident,$row:ident,$out_cname:ident,$prefix:expr, {$pg_name:ident => $func:ident () -> $ret:ty => !, $($token_a:tt)* } : {$($token_b:tt)*} ) => {
+        __mt_c_val!{$sql_conn,$row,$out_cname,$prefix, {$($token_a)*} : {$($token_b)* $pg_name : $func(&$sql_conn,$row.get_unwrap((format!("{}_{}",$prefix,stringify!($pg_name))).as_str())) , }}
+    };
+    ( $sql_conn:ident,$row:ident,$out_cname:ident,$prefix:expr, {$pg_name:ident => $conv:ty => !, $($token_a:tt)*} : {$($token_b:tt)* } ) => {
+        __mt_c_val!{$sql_conn,$row,$out_cname,$prefix, {$($token_a)*} : {$($token_b)* $pg_name : $row.get_unwrap::<_,$conv>((format!("{}_{}",$prefix,stringify!($pg_name))).as_str()),}}
+    };
+    ( $sql_conn:ident,$row:ident,$out_cname:ident,$prefix:expr, {$pg_name:ident => $func:ident () -> $ret:ty => $sql_name:ident, $($token_a:tt)*} : {$($token_b:tt)*} ) => {
+        __mt_c_val!{$sql_conn,$row,$out_cname,$prefix, {$($token_a)*} : {$($token_b)* $pg_name : $func(&$sql_conn,$row.get_unwrap((format!("{}_{}",$prefix,stringify!($sql_name))).as_str())) , }}
+    };
+    ( $sql_conn:ident,$row:ident,$out_cname:ident,$prefix:expr, {$pg_name:ident => $conv:ty => $sql_name:ident, $($token_a:tt)*} : {$($token_b:tt)*} ) => {
+        __mt_c_val!{$sql_conn,$row,$out_cname,$prefix, {$($token_a)*} : {$($token_b)* $pg_name : $row.get_unwrap::<_,$conv>((format!("{}_{}",$prefix,stringify!($sql_name))).as_str()),}}
+    };
+    ( $sql_conn:ident,$row:ident,$out_cname:ident,$prefix:expr, {$pg_name:ident => $cname:ident $subtree:tt, $($token_a:tt)*} : {$($token_b:tt)*} ) => {
+        compile_error!("todo")//__mt_c_val!{$sql_conn,$row,$out_cname,$prefix, {$(token_a)*} : {$($token_b)* $pg_name : /* !!! */,}}
+    };
+    ( $sql_conn:ident,$row:ident,$out_cname:ident,$prefix:expr, {$pg_name:ident => $cname:ident option $subtree:tt, $($token_a:tt)*} : {$($token_b:tt)*} ) => {
+        compile_error!("todo")//__mt_c_val!{$sql_conn,$row,$out_cname,$prefix, {$(token_a)*} : {$($token_b)* $pg_name : /* !!! */,}}
+    };
+    ( $sql_conn:ident,$row:ident,$out_cname:ident,$prefix:expr, {} : { $( $name:ident : $val:expr, )* }) => {
+        $out_cname {
+            $( $name : $val ,)*
+        }
+    };
+}
+
+macro_rules! __mt_values_arr {
+    ( $sql_conn:ident,$row:ident, $pg_name:ident => $func:ident () -> $ret:ty => !, $($token:tt)* ) => {
+        MTWeirdHack::Arr(vec!(MTWeirdHack::Val(Box::new($func(&$sql_conn,$row.get_unwrap(stringify!($pg_name)))) as Box<pg::types::ToSql>), __mt_values_arr!($sql_conn,$row,$($token)*)))
+    };
+    ( $sql_conn:ident,$row:ident, $pg_name:ident => $conv:ty => !, $($token:tt)* ) => {
+        MTWeirdHack::Arr(vec!(MTWeirdHack::Val(Box::new($row.get_unwrap::<_,$conv>(stringify!($pg_name))) as Box<pg::types::ToSql>), __mt_values_arr!($sql_conn,$row,$($token)*)))
+    };
+    ( $sql_conn:ident,$row:ident, $pg_name:ident => $func:ident () -> $ret:ty => $sql_name:ident, $($token:tt)* ) => {
+        MTWeirdHack::Arr(vec!(MTWeirdHack::Val(Box::new($func(&$sql_conn,$row.get_unwrap(stringify!($sql_name)))) as Box<pg::types::ToSql>), __mt_values_arr!($sql_conn,$row,$($token)*)))
+    };
+    ( $sql_conn:ident,$row:ident, $pg_name:ident => $conv:ty => $sql_name:ident, $($token:tt)* ) => {
+        MTWeirdHack::Arr(vec!(MTWeirdHack::Val(Box::new($row.get_unwrap::<_,$conv>(stringify!($sql_name))) as Box<pg::types::ToSql>), __mt_values_arr!($sql_conn,$row,$($token)*)))
+    };
+    ( $sql_conn:ident,$row:ident, $pg_name:ident => $cname:ident $subtree:tt, $($token:tt)* ) => {
+        MTWeirdHack::Arr(vec!(MTWeirdHack::Val(Box::new(__mt_c_val!($sql_conn,$row,$cname,stringify!($pg_name),$subtree : {})) as Box<pg::types::ToSql>), __mt_values_arr!($sql_conn,$row,$($token)*)))
+    };
+    ( $sql_conn:ident,$row:ident, $pg_name:ident => $cname:ident option $subtree:tt, $($token:tt)* ) => {{
+        let is_some_col_name = format!("{}_is_some",stringify!($pg_name));
+        let is_some:bool = $row.get_unwrap(is_some_col_name.as_str());
+        let val:Option<$cname> = if is_some {
+            Some(__mt_c_val!($sql_conn,$row,$cname,stringify!($pg_name),$subtree : {}))
+        } else { None };
+        MTWeirdHack::Arr(vec!(MTWeirdHack::Val(Box::new(val) as Box<pg::types::ToSql>), __mt_values_arr!($sql_conn,$row,$($token)*)))
+    }};
+    ($sql_conn:ident,$row:ident, ) => {MTWeirdHack::Arr(Vec::new())};
+}
 
 macro_rules! migrate_table {
     (
         ( $pg_conn:ident, $sql_conn:ident, $table_name:ident ) $( $token:tt )*
     ) => {{
-        //__mt_define_types!{$($token)*}
+        __mt_define_types!{$($token)*}
         let table_name = stringify!($table_name);
         println!("Migrating table {}",table_name);
         let sql_columns = __mt_sql_column_names!("",$($token)*).flatten();
-        println!("{:?}", &sql_columns);
+        dbg!(&sql_columns);
         let sqlite_select_str = format!("SELECT {} FROM {}",sql_columns.join(","),table_name);
+        dbg!(&sqlite_select_str);
         let mut sqlite_select_stmt = $sql_conn.prepare_cached(&sqlite_select_str).unwrap();
 
         let pg_column_names = __mt_pg_column_names!("",$($token)*).flatten();
-        let question_marks = std::iter::repeat("?").take(pg_column_names.len()).collect::<Vec<&str>>().join(",");
-        let postgres_insert_str = format!("INSERT INTO {} ({}) VALUES ({})",table_name,pg_column_names.join(","),question_marks);
-        
+        //let question_marks = std::iter::repeat("?").take(pg_column_names.len()).collect::<Vec<&str>>().join(",");
+        let pg_parameters = (0..pg_column_names.len()).into_iter().map(|j| format!("${}",j+1)).collect::<Vec<String>>().join(",");
+        let postgres_insert_str = format!("INSERT INTO {} ({}) VALUES ({})",table_name,pg_column_names.join(","),pg_parameters);
+        //println!("pg insert str {:?}", postgres_insert_str);
+        dbg!(&postgres_insert_str);
+        let postgres_stmt = $pg_conn.prepare(&postgres_insert_str).unwrap();
 
 
-        println!("pg insert str {:?}", postgres_insert_str);
 
 
-
-
-
+        /*
         let count_str = format!("SELECT COUNT(*) FROM {}",table_name);
         let count:i64 = $sql_conn.query_row(&count_str,NO_PARAMS,|r| r.get(0)).unwrap();
         println!("{} rows",count);
-        //let mut rows = sqlite_select_stmt.query(NO_PARAMS).unwrap();
+        */
+        
+        let mut rows = sqlite_select_stmt.query(NO_PARAMS).unwrap();
 
-        //while let Some(row) = rows.next().unwrap() {
-        //    __mt_values_arr!(row
+        while let Some(row) = rows.next().unwrap() {
+            println!("{:?}", row.columns());
+            /*println!("just makin sure");
+            println!("{:?}",Box::new(filter_string(&$sql_conn,row.get_unwrap(8))));
+            println!("{:?}",Box::new(filter_string(&$sql_conn,row.get_unwrap("content_binary"))));
+            println!("like super sure");*/
+            let pg_vals_boxes = __mt_values_arr!($sql_conn,row, $( $token )*).flatten();
+            let pg_vals:Vec<&pg::types::ToSql> = pg_vals_boxes.iter().map(|v| &**v).collect();
+            dbg!(&pg_vals);
+            match postgres_stmt.execute(&pg_vals) {
+                Ok(v) => assert_eq!(v, 1),
+                Err(e) => eprintln!("{:#?}",e),
+            }
+            panic!();
+        }
+        postgres_stmt.finish().unwrap();
     }};
 }
 
 pub fn migrate_sqlite_to_postgres(/*pg_conn: &mut pg::Transaction*/) -> () {
+    println!("running any remaining sqlite migrations");
+    sqlite_migrate();
+    println!("finished sqlite migrations, writing postgres schema");
     //TODO: Ensure postgres database is *empty*
     let mut pg_conn = pg::Connection::connect("postgres://shelvacu@%2Fvar%2Frun%2Fpostgresql:5434/detroit", TlsMode::None).unwrap();
     let mut pg_trans = pg_conn.transaction().unwrap();
+    pg_trans.batch_execute(include_str!("../postgres_init.sql")).unwrap();
     //let mut pg_conn = pg::Connection::connect("postgres://shelvacu@localhost:5434/detroit", TlsMode::None).unwrap();
     //let sql_conn = 5;
     let mut sql_conn = make_sqlite_connection().expect("could not establish database connection");
 
+    /*
     trace_macros!(true);
-    __mt_define_types!{
-        author => Bla {
-            id => i64 => !,
-        },
-    }
-    trace_macros!(false);
-    /*migrate_table!{
-    //__mt_define_types!{
-        (pg_trans, sql_conn, message)
-        rowid => i64 => !,
-        discord_id => i64 => !,
-        author => MTAuthor {
+    __mt_c_val!{
+        sql_conn, row, Bla, "author",
+        {
             id => i64 => !,
             avatar => String => !,
-            is_bot => bool => !,
-            discriminator => i64 => !,
-            name => String => !,
+        } : {}
+    }// */
+    trace_macros!(false);
+    // /*
+    migrate_table!{
+    //__mt_define_types!{
+        (pg_trans, sql_conn, message)
+        rowid => i64 => !, //0
+        discord_id => str_sf() -> Snowflake => !, //1
+        author => discord_user {
+            id => str_sf() -> Snowflake => !, //2
+            avatar => String => !, //3
+            is_bot => bool => !, //4
+            discriminator => i16 => !, //5
+            name => String => !, //6
         },
-        channel_id => i64 => !,
-        content => filter_string() -> String => content_binary,
-        edited_timestamp => Option<chrono::DateTime<chrono::FixedOffset>> => !,
-        guild_id => i64 => !,
+        channel_id => str_sf() -> Snowflake => !, //7
+        content => filter_string() -> String => content_binary, //8
+        edited_timestamp => Option<chrono::DateTime<chrono::Utc>> => !, //9
+        guild_id => str_sf() -> Snowflake => !,
         kind => String => !,
         member => MTMember option{
             deaf => bool => !,
-            joined_at => Option<chrono::DateTime<chrono::FixedOffset>> => !,
+            joined_at => Option<chrono::DateTime<chrono::Utc>> => !,
             mute => bool => !,
             roles => id_arr() -> Vec<i64> => !,
         },
@@ -304,11 +440,11 @@ pub fn migrate_sqlite_to_postgres(/*pg_conn: &mut pg::Transaction*/) -> () {
         mention_roles => id_arr() -> Vec<i64> => !,
         nonce_debug => String => !,
         pinned => bool => !,
-        timestamp => chrono::DateTime<chrono::FixedOffset> => !,
+        timestamp => chrono::DateTime<chrono::Utc> => !,
         tts => bool => !,
-        webhook_id => Option<i64> => !,
-        archive_recvd_at => chrono::DateTime<chrono::FixedOffset> => !,
-    }*/
+        webhook_id => optstr_sf() -> Option<Snowflake> => !,
+        archive_recvd_at => chrono::DateTime<chrono::Utc> => !,
+    }// */
     trace_macros!(false);
     
     pg_trans.commit().expect("Failed to commit txn");
@@ -626,7 +762,7 @@ received_live int not null --bool
 
     let mut version:i64 = if perm_overwrite_exists { -1 } else { -2 };
 
-    while version < 5 {
+    while version < 6 {
         version = conn.query_row(
             "SELECT version FROM migration_version",
             NO_PARAMS,
@@ -988,56 +1124,12 @@ UPDATE migration_version SET version = 5;
 ").expect("Failed migration 4=>5");
             },
             5 => {
-                /*tx.execute_batch("
-CREATE TABLE channel_create_event (
-rowid integer primary key autoincrement,
-recvd_at text not null --datetime
-);
-
-CREATE TABLE guild_channel_bak (
-rowid integer primary key autoincrement,
-discord_id int not null,
-guild_rowid int REFERENCES guild(rowid), --possibly null
-guild_id int not null,
-bitrate int,
-category_id int,
-kind text not null,
-last_message_id int,
-last_pin_timestamp text, --datetime
-name text not null,
---permission overwrites
-position int not null, --can be negative!
-topic text,
-user_limit int,
-nsfw int not null --bool
-);
-INSERT INTO guild_channel_bak SELECT * FROM guild_channel;
-DROP TABLE guild_channel;
-CREATE TABLE guild_channel (
-rowid integer primary key autoincrement,
-discord_id int not null,
-guild_rowid int REFERENCES guild(rowid), --possibly null
-channel_create_event_rowid int UNIQUE REFERENCES channel_create_event(rowid), --possibly null
-guild_id int not null,
-bitrate int,
-category_id int,
-kind text not null,
-last_message_id int,
-last_pin_timestamp text, --datetime
-name text not null,
---permission overwrites
-position int not null, --can be negative!
-topic text,
-user_limit int,
-nsfw int not null --bool
-);
-INSERT INTO guild_channel SELECT rowid, discord_id, guild_rowid, NULL, guild_id, bitrate, category_id, kind, last_message_id, last_pin_timestamp, name, position, topic, user_limit, nsfw FROM guild_channel_bak;
-
-
+                tx.execute_batch("
+UPDATE message SET content_binary = CAST(content as BLOB) WHERE content_binary IS NULL;
 UPDATE migration_version SET version = 6;
-").unwrap();*/
+").expect("Failed migration 5=>6");
             },
-            //6 => {},
+            6 => {},
             _ => panic!("unrecognized migration version"),
         }
         tx.commit().unwrap();

@@ -2,6 +2,13 @@
 #![feature(trace_macros)]
 #![deny(unused_must_use)]
 
+#![allow(unused_macros)] //todo
+#![allow(unreachable_code)]
+#![allow(unused_imports)]
+#![allow(unused_variables)]
+#![allow(unused_mut)]
+#![allow(dead_code)]
+
 extern crate serenity;
 extern crate rusqlite as sqlite;
 extern crate r2d2_postgres;
