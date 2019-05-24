@@ -1200,19 +1200,48 @@ impl EventHandler for Handler {
 }
 
 fn main() {
-    legacy::migrate_sqlite_to_postgres();
-    println!("FINISH");
-    println!();
-    println!();
-    println!();
-    println!();
-    println!();
-    std::process::exit(0);
+    use argparse::{ArgumentParser, StoreTrue, Store, Print};
+    let mut verbose = false;
+    let mut do_migrate = false;
+    let mut discord_token = String::from("");
+
+    {
+        let mut ap = ArgumentParser::new();
+        ap.set_description("A discord bot for recording/archiving");
+        /*ap.refer(&mut verbose)
+            .add_option(&["-v", "--verbose"], StoreTrue,
+                        "Show more information. Doesn't currently have any effect");*/
+        ap.refer(&mut do_migrate)
+            .add_option(&["--sqlite-migration"], StoreTrue,
+                        "Perform a migration from a legacy SQLite database. Put the db file name in DATABASE_FILENAME");
+        ap.refer(&mut discord_token)
+            .envvar("DISCORD_TOKEN")
+            .add_option(&["-t", "--token"], Store,
+                        "Discord API token to use. Can also be provided in environment variable DISCORD_TOKEN");
+        ap.add_option(
+            &["-V", "-v", "--version"],
+            Print(format!("{} {} {}",env!("CARGO_PKG_NAME"),env!("CARGO_PKG_VERSION"),env!("TARGET"))),
+            "Show version"
+        );
+        ap.parse_args_or_exit()
+    }
+
+    if do_migrate {
+        legacy::migrate_sqlite_to_postgres();
+        println!("FINISH");
+        println!();
+        println!();
+        println!();
+        println!();
+        println!();
+        std::process::exit(0);
+    }
+    
     //panic!();
-    let token = env::var("DISCORD_TOKEN")
+    /*let token = env::var("DISCORD_TOKEN")
         .or_else(|_| std::fs::read_to_string("../discord.token"))
         .expect("Expected a token in the environment")
-        .to_owned();
+        .to_owned();*/
     
     /*let handler = Handler{conn: Mutex::new(conn), currently_archiving: Arc::new(Mutex::new(()))};
     let mut client = Client::new(&token, handler).expect("Err creating client");
