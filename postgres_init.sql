@@ -392,6 +392,7 @@ CREATE TABLE message_archive_gets (
   end_message_id        snowflake not null,
   message_count_requested int8 not null,
   message_count_received int8 not null,
+  legacy                bool not null default false,
   CHECK(
     (
       after_message_id IS NULL
@@ -411,6 +412,16 @@ CREATE TABLE message_archive_gets (
     OR
     (
       after_message_id IS NOT NULL
+     AND
+      around_message_id IS NULL
+     AND
+      before_message_id IS NULL
+    )
+    OR
+    (
+      legacy
+     AND
+      after_message_id IS NULL
      AND
       around_message_id IS NULL
      AND

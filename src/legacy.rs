@@ -501,10 +501,9 @@ pub fn migrate_sqlite_to_postgres(/*pg_conn: &mut pg::Transaction*/) -> () {
     println!("running any remaining sqlite migrations");
     sqlite_migrate();
     println!("finished sqlite migrations, writing postgres schema");
-    //TODO: Ensure postgres database is *empty*
     let mut pg_conn = pg::Connection::connect("postgres://shelvacu@%2Fvar%2Frun%2Fpostgresql:5434/detroit", TlsMode::None).unwrap();
 
-    let mp_table_exist_sql = "SELECT EXISTS (SELECT 1 FROM pg_tables WHERE schema_name = 'public' AND tablename = 'sqlite_migration_progress')";
+    let mp_table_exist_sql = "SELECT EXISTS (SELECT 1 FROM pg_tables WHERE schemaname = 'public' AND tablename = 'sqlite_migration_progress')";
     let mp_table_exists:bool = pg_conn.query(mp_table_exist_sql, &[] as &[&pg::types::ToSql]).unwrap().get(0).get(0);
     
     if !mp_table_exists {
@@ -615,6 +614,13 @@ pub fn migrate_sqlite_to_postgres(/*pg_conn: &mut pg::Transaction*/) -> () {
         pg_trans.commit().expect("Failed to commit txn");
     }
 
+    //I forgot to put in something for 1 and I'm too lazy to change the rest of them so yeah
+    if get_progress() == 1 {
+        let mut pg_trans = pg_conn.transaction().unwrap();
+        increment_progress_to(&pg_trans, 2);
+        pg_trans.commit().unwrap();
+    }
+
     if get_progress() == 2 {
         let mut pg_trans = pg_conn.transaction().unwrap();
         mass_insert_helper!{
@@ -690,7 +696,7 @@ pub fn migrate_sqlite_to_postgres(/*pg_conn: &mut pg::Transaction*/) -> () {
         pub text: String,
     }
     #[derive(Clone,Debug,ToSql,FromSql)]
-    #[postgres(name = "embed_author")]
+    #[postgres(name = "embed_footer")]
     struct EmbedFooter(pub EmbedFooterInner);
 
     #[derive(Clone,Debug,ToSql,FromSql)]
@@ -804,51 +810,392 @@ pub fn migrate_sqlite_to_postgres(/*pg_conn: &mut pg::Transaction*/) -> () {
         increment_progress_to(&pg_trans, 5);
         pg_trans.commit().unwrap();
     }
-    /*
-    trace_macros!(true);
-    __mt_c_val!{
-        sql_conn, row, Bla, "author",
-        {
-            id => i64 => !,
-            avatar => String => !,
-        } : {}
-    }// */
-    trace_macros!(false);
-    /*
-    migrate_table!{
-    //__mt_define_types!{
-        (pg_trans, sql_conn, message)
-        rowid => i64 => !, //0
-        discord_id => str_sf() -> Snowflake => !, //1
-        author => MTUser {
-            discord_id => str_sf() -> Snowflake => id, //2
-            avatar => Option<String> => !, //3
-            is_bot => bool => !, //4
-            discriminator => i16 => !, //5
-            name => String => !, //6
-        },
-        channel_id => str_sf() -> Snowflake => !, //7
-        content => filter_string() -> String => content_binary, //8
-        edited_timestamp => Option<chrono::DateTime<chrono::Utc>> => !, //9
-        guild_id => optstr_sf() -> Option<Snowflake> => !, //10
-        kind => String => !,
-        member => MTMember option{
-            deaf => bool => !,
-            joined_at => Option<chrono::DateTime<chrono::Utc>> => !,
-            mute => bool => !,
-            roles => id_arr() -> Vec<i64> => !,
-        },
-        mention_everyone => bool => !,
-        mention_roles => id_arr() -> Vec<i64> => !,
-        nonce_debug => String => !,
-        pinned => bool => !,
-        timestamp => chrono::DateTime<chrono::Utc> => !,
-        tts => bool => !,
-        webhook_id => optstr_sf() -> Option<Snowflake> => !,
-        archive_recvd_at => chrono::DateTime<chrono::Utc> => !,
-    }// */
-    trace_macros!(false);
+
+    if get_progress() == 5 {
+        let mut pg_trans = pg_conn.transaction().unwrap();
+        mass_insert_helper!{
+            sql_conn, "embed_field", row,
+            pg_insert_helper!(
+                pg_trans, "embed_field",
+                rowid => row.get_unwrap::<_,i64>("rowid"),
+                embed_rowid => row.get_unwrap::<_,i64>("embed_rowid"),
+                inline => row.get_unwrap::<_,bool>("inline"),
+                name => row.get_unwrap::<_,String>("name"),
+                value => row.get_unwrap::<_,String>("value"),
+            ).unwrap(),
+            "*",
+        }
+        increment_progress_to(&pg_trans, 6);
+        pg_trans.commit().unwrap();
+    }
+
+    #[derive(Clone,Debug,ToSql,FromSql)]
+    #[postgres(name = "__t_serenity_current_user")]
+    struct CurrentUserInner{
+        pub inner_user: DiscordUser,
+        pub email: Option<String>,
+        pub mfa_enabled: bool,
+        pub verified: bool,
+    }
+    #[derive(Clone,Debug,ToSql,FromSql)]
+    #[postgres(name = "serenity_current_user")]
+    struct CurrentUser(pub CurrentUserInner);
+
+    if get_progress() == 6 {
+        let mut pg_trans = pg_conn.transaction().unwrap();
+        mass_insert_helper!{
+            sql_conn, "ready", row,
+            pg_insert_helper!(
+                pg_trans, "ready",
+                rowid => row.get_unwrap::<_,i64>("rowid"),
+                session_id => row.get_unwrap::<_,String>("session_id"),
+                shard => vec![row.get_unwrap::<_,Option<i64>>("shard_0"),row.get_unwrap::<_,Option<i64>>("shard_1")],
+                trace => row.get_unwrap::<_,String>("trace").split(",").map(String::from).collect::<Vec<String>>(),
+                user_info => CurrentUser(CurrentUserInner{
+                    inner_user: DiscordUser(DiscordUserInner{
+                        discord_id: row.get_unwrap("user_id"),
+                        avatar: row.get_unwrap("user_avatar"),
+                        is_bot: row.get_unwrap("user_bot"),
+                        discriminator: row.get_unwrap("user_discriminator"),
+                        name: row.get_unwrap("user_name"),
+                    }),
+                    email: row.get_unwrap("user_email"),
+                    mfa_enabled: row.get_unwrap("user_mfa_enabled"),
+                    verified: row.get_unwrap("user_verified"),
+                }),
+                version => row.get_unwrap::<_,i64>("version"),
+            ).unwrap(),
+            "*",
+        }
+        increment_progress_to(&pg_trans, 7);
+        pg_trans.commit().unwrap();
+    }
+
+    if get_progress() == 7 {
+        let mut pg_trans = pg_conn.transaction().unwrap();
+        let mut sqlite_group_user_stmt = sql_conn.prepare("SELECT * FROM group_user WHERE group_channel_rowid = ?").unwrap();
+        mass_insert_helper!{
+            sql_conn, "group_channel", row,
+            {
+                let mut recipients = Vec::new();
+                let rowid = row.get_unwrap::<_,i64>("rowid");
+                let mut rows = sqlite_group_user_stmt.query(&[&rowid as &sqlite::ToSql]).unwrap();
+                while let Some(irow) = rows.next().unwrap() {
+                    recipients.push(DiscordUser(DiscordUserInner{
+                        discord_id: irow.get_unwrap("discord_id"),
+                        avatar: irow.get_unwrap("avatar"),
+                        is_bot: irow.get_unwrap("bot"),
+                        discriminator: irow.get_unwrap("discriminator"),
+                        name: irow.get_unwrap("name"),
+                    }));
+                }
+                pg_insert_helper!(
+                    pg_trans, "group_channel",
+                    rowid => rowid,
+                    ready_rowid => row.get_unwrap::<_,i64>("ready_rowid"),
+                    discord_id => row.get_unwrap::<_,Snowflake>("discord_id"),
+                    icon => row.get_unwrap::<_,Option<String>>("icon"),
+                    last_message_id => row.get_unwrap::<_,Option<Snowflake>>("last_message_id"),
+                    last_pin_timestamp => row.get_unwrap::<_,Option<chrono::DateTime<chrono::Utc>>>("last_pin_timestamp"),
+                    name => row.get_unwrap::<_,Option<String>>("name"),
+                    owner_id => row.get_unwrap::<_,Snowflake>("owner_id"),
+                    recipients => recipients,
+                ).unwrap();
+            },
+            "*",
+        }
+        increment_progress_to(&pg_trans, 8);
+        pg_trans.commit().unwrap();
+    }
+
+    if get_progress() == 8 {
+        let mut pg_trans = pg_conn.transaction().unwrap();
+        mass_insert_helper!{
+            sql_conn, "private_channel", row,
+            pg_insert_helper!(
+                pg_trans, "private_channel",
+                rowid => row.get_unwrap::<_,i64>("rowid"),
+                ready_rowid => row.get_unwrap::<_,i64>("ready_rowid"),
+                discord_id => row.get_unwrap::<_,Snowflake>("discord_id"),
+                last_message_id => row.get_unwrap::<_,Option<Snowflake>>("last_message_id"),
+                last_pin_timestamp => row.get_unwrap::<_,Option<chrono::DateTime<chrono::Utc>>>("last_pin_timestamp"),
+                kind => row.get_unwrap::<_,String>("kind"),
+                recipient => DiscordUser(DiscordUserInner{
+                    discord_id: row.get_unwrap("recipient_id"),
+                    avatar: row.get_unwrap("recipient_avatar"),
+                    is_bot: row.get_unwrap("recipient_bot"),
+                    discriminator: row.get_unwrap("recipient_discriminator"),
+                    name: row.get_unwrap("recipient_name"),
+                }),
+            ).unwrap(),
+            "*",
+        }
+        increment_progress_to(&pg_trans, 9);
+        pg_trans.commit().unwrap();
+    }
     
+    if get_progress() == 9 {
+        let mut pg_trans = pg_conn.transaction().unwrap();
+        mass_insert_helper!{
+            sql_conn, "guild", row,
+            pg_insert_helper!(
+                pg_trans, "guild",
+                rowid => row.get_unwrap::<_,i64>("rowid"),
+                ready_rowid => row.get_unwrap::<_,Option<i64>>("ready_rowid"),
+                discord_id => row.get_unwrap::<_,Snowflake>("discord_id"),
+                afk_channel_id => row.get_unwrap::<_,Option<Snowflake>>("afk_channel_id"),
+                afk_timeout => row.get_unwrap::<_,Option<i64>>("afk_timeout"),
+                application_id => row.get_unwrap::<_,Option<Snowflake>>("application_id"),
+                default_message_notification_level => row.get_unwrap::<_,String>("default_message_notification_level"), //I know the sqlite schema says this is an "int", but sqlite doesnt actually enforce types and text/strings were inserted into that column.
+                explicit_content_filter => row.get_unwrap::<_,String>("explicit_content_filter"),
+                features => row.get_unwrap::<_,String>("features").split(",").map(String::from).collect::<Vec<String>>(),
+                icon => row.get_unwrap::<_,Option<String>>("icon"),
+                joined_at => row.get_unwrap::<_,Option<chrono::DateTime<chrono::Utc>>>("joined_at"),
+                large => row.get_unwrap::<_,bool>("large"),
+                member_count => row.get_unwrap::<_,i64>("member_count"),
+                mfa_level => row.get_unwrap::<_,String>("mfa_level"),
+                name => row.get_unwrap::<_,String>("name"),
+                owner_id => row.get_unwrap::<_,Snowflake>("owner_id"),
+                region => row.get_unwrap::<_,String>("region"),
+                splash => row.get_unwrap::<_,Option<String>>("splash"),
+                system_channel_id => row.get_unwrap::<_,Option<Snowflake>>("system_channel_id"),
+                verification_level => row.get_unwrap::<_,String>("verification_level"),
+                archive_recvd_at => row.get_unwrap::<_,chrono::DateTime<chrono::Utc>>("archive_recvd_at"),
+            ).unwrap(),
+            "*",
+        }
+        increment_progress_to(&pg_trans, 10);
+        pg_trans.commit().unwrap();
+    }
+
+    if get_progress() == 10 {
+        let mut pg_trans = pg_conn.transaction().unwrap();
+        mass_insert_helper!{
+            sql_conn, "guild_channel", row,
+            pg_insert_helper!(
+                pg_trans, "guild_channel",
+                rowid => row.get_unwrap::<_,i64>("rowid"),
+                guild_rowid => row.get_unwrap::<_,i64>("guild_rowid"),
+                discord_id => row.get_unwrap::<_,Snowflake>("discord_id"),
+                bitrate => row.get_unwrap::<_,Option<i64>>("bitrate"),
+                category_id => row.get_unwrap::<_,Option<Snowflake>>("category_id"),
+                guild_id => row.get_unwrap::<_,Snowflake>("guild_id"),
+                kind => row.get_unwrap::<_,String>("kind"),
+                last_message_id => row.get_unwrap::<_,Option<Snowflake>>("last_message_id"),
+                last_pin_timestamp => row.get_unwrap::<_,Option<chrono::DateTime<chrono::Utc>>>("last_pin_timestamp"),
+                name => row.get_unwrap::<_,String>("name"),
+                position => row.get_unwrap::<_,i64>("position"),
+                topic => row.get_unwrap::<_,Option<String>>("topic"),
+                user_limit => row.get_unwrap::<_,Option<i64>>("user_limit"),
+                nsfw => row.get_unwrap::<_,bool>("nsfw"),
+            ).unwrap(),
+            "*",
+        }
+        increment_progress_to(&pg_trans, 11);
+        pg_trans.commit().unwrap();
+    }
+        
+    if get_progress() == 11 {
+        let mut pg_trans = pg_conn.transaction().unwrap();
+        mass_insert_helper!{
+            sql_conn, "permission_overwrite", row,
+            pg_insert_helper!(
+                pg_trans, "permission_overwrite",
+                rowid => row.get_unwrap::<_,i64>("rowid"),
+                guild_channel_rowid => row.get_unwrap::<_,i64>("guild_channel_rowid"),
+                allow_bits => row.get_unwrap::<_,i64>("allow_bits"),
+                deny_bits => row.get_unwrap::<_,i64>("deny_bits"),
+                permission_overwrite_type => row.get_unwrap::<_,String>("permission_overwrite_type"),
+                permission_overwrite_id => row.get_unwrap::<_,Snowflake>("permission_overwrite_id"),
+            ).unwrap(),
+            "*",
+        }
+        increment_progress_to(&pg_trans, 12);
+        pg_trans.commit().unwrap();
+    }
+                
+    if get_progress() == 12 {
+        let mut pg_trans = pg_conn.transaction().unwrap();
+        mass_insert_helper!{
+            sql_conn, "emoji", row,
+            pg_insert_helper!(
+                pg_trans, "emoji",
+                rowid => row.get_unwrap::<_,i64>("rowid"),
+                guild_rowid => row.get_unwrap::<_,i64>("guild_rowid"),
+                discord_id => row.get_unwrap::<_,Snowflake>("discord_id"),
+                animated => row.get_unwrap::<_,bool>("animated"),
+                name => row.get_unwrap::<_,String>("name"),
+                managed => row.get_unwrap::<_,bool>("managed"),
+                require_colons => row.get_unwrap::<_,bool>("require_colons"),
+                roles => snowflake_arr(&sql_conn, row.get_unwrap("roles")),
+            ).unwrap(),
+            "*",
+        }
+        increment_progress_to(&pg_trans, 13);
+        pg_trans.commit().unwrap();
+    }
+
+    if get_progress() == 13 {
+        let mut pg_trans = pg_conn.transaction().unwrap();
+        mass_insert_helper!{
+            sql_conn, "member", row,
+            pg_insert_helper!(
+                pg_trans, "member",
+                rowid => row.get_unwrap::<_,i64>("rowid"),
+                guild_rowid => row.get_unwrap::<_,i64>("guild_rowid"),
+                guild_id => row.get_unwrap::<_,Snowflake>("guild_id"),
+                deaf => row.get_unwrap::<_,bool>("deaf"),
+                joined_at => row.get_unwrap::<_,Option<chrono::DateTime<chrono::Utc>>>("joined_at"),
+                mute => row.get_unwrap::<_,bool>("mute"),
+                nick => row.get_unwrap::<_,Option<String>>("nick"),
+                roles => snowflake_arr(&sql_conn, row.get_unwrap("roles")),
+                user_info => DiscordUser(DiscordUserInner{
+                    discord_id: row.get_unwrap("user_id"),
+                    avatar: row.get_unwrap("user_avatar"),
+                    is_bot: row.get_unwrap("user_is_bot"),
+                    discriminator: row.get_unwrap("user_discriminator"),
+                    name: row.get_unwrap("user_name"),
+                }),
+            ).unwrap(),
+            "*",
+        }
+        increment_progress_to(&pg_trans, 14);
+        pg_trans.commit().unwrap();
+    }
+
+    
+    #[derive(Clone,Debug,ToSql,FromSql)]
+    #[postgres(name = "__t_user_presence_game")]
+    struct UserPresenceGameInner{
+        pub kind: String,
+        pub name: String,
+        pub url: Option<String>,
+    }
+    #[derive(Clone,Debug,ToSql,FromSql)]
+    #[postgres(name = "user_presence_game")]
+    struct UserPresenceGame(pub UserPresenceGameInner);
+
+
+    if get_progress() == 14 {
+        let mut pg_trans = pg_conn.transaction().unwrap();
+        mass_insert_helper!{
+            sql_conn, "user_presence", row,
+            {
+                let game = if row.get_unwrap::<_,bool>("game_is_some") {
+                    Some(UserPresenceGame(UserPresenceGameInner{
+                        kind: row.get_unwrap::<_,String>("game_type"),
+                        name: row.get_unwrap::<_,String>("game_name"),
+                        url: row.get_unwrap::<_,Option<String>>("game_url"),
+                    }))
+                } else { None };
+                pg_insert_helper!(
+                    pg_trans, "user_presence",
+                    rowid => row.get_unwrap::<_,i64>("rowid"),
+                    guild_rowid => row.get_unwrap::<_,Option<i64>>("guild_rowid"),
+                    ready_rowid => row.get_unwrap::<_,Option<i64>>("ready_rowid"),
+                    
+                    game => game,
+                    last_modified => row.get_unwrap::<_,Option<i64>>("last_modified"),
+                    nick => row.get_unwrap::<_,Option<String>>("nick"),
+                    status => row.get_unwrap::<_,String>("status"),
+                    user_id => row.get_unwrap::<_,Snowflake>("user_id"),
+                ).unwrap();
+            },
+            "*",
+        }
+        increment_progress_to(&pg_trans, 15);
+        pg_trans.commit().unwrap();
+    }
+    
+
+    if get_progress() == 15 {
+        let mut pg_trans = pg_conn.transaction().unwrap();
+        mass_insert_helper!{
+            sql_conn, "guild_role", row,
+            pg_insert_helper!(
+                pg_trans, "guild_role",
+                rowid => row.get_unwrap::<_,i64>("rowid"),
+                guild_rowid => row.get_unwrap::<_,Option<i64>>("guild_rowid"),
+                discord_id => row.get_unwrap::<_,Snowflake>("discord_id"),
+                colour_u32 => DiscordColour(row.get_unwrap::<_,i64>("colour_u32")),
+                hoist => row.get_unwrap::<_,bool>("hoist"),
+                managed => row.get_unwrap::<_,bool>("managed"),
+                mentionable => row.get_unwrap::<_,bool>("mentionable"),
+                name => row.get_unwrap::<_,String>("name"),
+                permissions_bits => row.get_unwrap::<_,i64>("permissions_bits"),
+                position => row.get_unwrap::<_,i64>("position"),
+            ).unwrap(),
+            "*",
+        }
+        increment_progress_to(&pg_trans, 16);
+        pg_trans.commit().unwrap();
+    }
+
+
+    if get_progress() == 16 {
+        let mut pg_trans = pg_conn.transaction().unwrap();
+        mass_insert_helper!{
+            sql_conn, "voice_state", row,
+            pg_insert_helper!(
+                pg_trans, "voice_state",
+                rowid => row.get_unwrap::<_,i64>("rowid"),
+                guild_rowid => row.get_unwrap::<_,Option<i64>>("guild_rowid"),
+                channel_id => row.get_unwrap::<_,Option<Snowflake>>("channel_id"),
+                deaf => row.get_unwrap::<_,bool>("deaf"),
+                mute => row.get_unwrap::<_,bool>("mute"),
+                self_deaf => row.get_unwrap::<_,bool>("self_deaf"),
+                self_mute => row.get_unwrap::<_,bool>("self_mute"),
+                session_id => row.get_unwrap::<_,String>("session_id"),
+                suppress => row.get_unwrap::<_,bool>("suppress"),
+                token => row.get_unwrap::<_,Option<String>>("token"),
+                user_id => row.get_unwrap::<_,Snowflake>("user_id"),
+            ).unwrap(),
+            "*",
+        }
+        increment_progress_to(&pg_trans, 17);
+        pg_trans.commit().unwrap();
+    }
+
+
+    if get_progress() == 17 {
+        let mut pg_trans = pg_conn.transaction().unwrap();
+        pg_insert_helper!(
+            pg_trans, "migration_version",
+            version => 7i64,
+        ).unwrap();
+        mass_insert_helper!{
+            sql_conn, "message_archive_gets", row,
+            {
+                /*let cols = row.columns();
+                let vals:Vec<_> = (0..row.column_count()).map(|i| (&cols[i], row.get_raw(i))).collect();
+                dbg!(vals);*/
+                pg_insert_helper!(
+                    pg_trans, "message_archive_gets",
+                    rowid => row.get_unwrap::<_,i64>("rowid"),
+                    channel_id => row.get_unwrap::<_,Snowflake>("channel_id"),
+                    ready_rowid => None as Option<i64>,
+                    after_message_id => row.get_unwrap::<_,Option<Snowflake>>("after_message_id"),
+                    around_message_id => row.get_unwrap::<_,Option<Snowflake>>("around_message_id"),
+                    before_message_id => row.get_unwrap::<_,Option<Snowflake>>("before_message_id"),
+                    start_message_id => row.get_unwrap::<_,Snowflake>("start_message_id"),
+                    end_message_id => row.get_unwrap::<_,Snowflake>("end_message_id"),
+                    message_count_requested => row.get_unwrap::<_,i64>("message_count_requested"),
+                    message_count_received => row.get_unwrap::<_,i64>("message_count_received"),
+                    legacy => true,
+                ).unwrap();
+            },
+            "*",
+        }
+        increment_progress_to(&pg_trans, 18);
+        pg_trans.commit().unwrap();
+    }
+
+    {
+        let mut pg_trans = pg_conn.transaction().unwrap();
+        increment_progress_to(&pg_trans, 19);
+        pg_trans.commit().unwrap();
+    }
+        
     println!("FINISHED!");
     //sql_conn.prepare_cached("SELECT");
 }
@@ -1529,6 +1876,7 @@ UPDATE migration_version SET version = 5;
                 tx.execute_batch("
 CREATE INDEX id_id_arr_rowid ON id(id_arr_rowid,id);
 CREATE INDEX user_mention_message_rowid ON user_mention(message_rowid);
+CREATE INDEX group_user_group_channel_rowid ON group_user(group_channel_rowid);
 UPDATE message SET content_binary = CAST(content as BLOB) WHERE content_binary IS NULL;
 UPDATE migration_version SET version = 6;
 ").expect("Failed migration 5=>6");

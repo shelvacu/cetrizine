@@ -1207,7 +1207,8 @@ fn main() {
     println!();
     println!();
     println!();
-    panic!();
+    std::process::exit(0);
+    //panic!();
     let token = env::var("DISCORD_TOKEN")
         .or_else(|_| std::fs::read_to_string("../discord.token"))
         .expect("Expected a token in the environment")
