@@ -3,6 +3,8 @@ use super::pg::TlsMode;
 use super::sqlite;
 use super::sqlite::{NO_PARAMS, OptionalExtension};
 
+use super::pbr::ProgressBar;
+
 #[derive(Debug)]
 enum MTWeirdHack<T> {
     Arr(Vec<MTWeirdHack<T>>),
@@ -28,7 +30,7 @@ impl<T> MTWeirdHack<T> {
     }
 }
 
-pub fn filter_string(_:&sqlite::Connection, v: Vec<u8>) -> String {
+pub fn filter_string(v: Vec<u8>) -> String {
     let s:String = std::str::from_utf8(&v).unwrap().into();
     if s.chars().all(|c| c != '\0' && c != '$') {
         s
@@ -64,6 +66,16 @@ pub fn id_arr(conn:&sqlite::Connection, i:i64) -> Vec<i64> {
     ).unwrap().map(Result::unwrap).collect()
 }
 
+pub fn snowflake_arr(conn:&sqlite::Connection, i:i64) -> Vec<Snowflake> {
+    conn.prepare_cached("SELECT id FROM id WHERE id_arr_rowid = ?1").unwrap().query_map(
+        &[&i as &sqlite::ToSql],
+        |r| {
+            let i:i64 = r.get::<_,String>(0).unwrap().parse().unwrap();
+            Ok(Snowflake::from(i))
+        }
+    ).unwrap().map(Result::unwrap).collect()
+}
+
 #[derive(Copy,Clone,Debug,FromSql,ToSql)]
 #[postgres(name = "snowflake")]
 pub struct Snowflake(i64);
@@ -92,6 +104,24 @@ impl From<Snowflake> for i64 {
     }
 }
 
+impl sqlite::types::ToSql for Snowflake {
+    fn to_sql(&self) -> sqlite::Result<sqlite::types::ToSqlOutput> {
+        Ok(sqlite::types::ToSqlOutput::Owned(sqlite::types::Value::Integer(self.0)))
+    }
+}
+
+impl sqlite::types::FromSql for Snowflake {
+    fn column_result(value: sqlite::types::ValueRef<'_>) -> sqlite::types::FromSqlResult<Self> {
+        Ok(Snowflake(value.as_i64()?))
+    }
+}
+
+impl<'a> From<String> for Snowflake {
+    fn from(s: String) -> Self {
+        Snowflake(s.parse().unwrap())
+    }
+}
+        
 pub fn str_sf(_:&sqlite::Connection, t:String) -> Snowflake {
     t.parse::<i64>().unwrap().into()
 }
@@ -230,16 +260,28 @@ macro_rules! __mt_define_single_type {
 
         #[allow(non_camel_case_types)]
         #[derive(ToSql,Debug)]
-        #[postgres(name = $outer_type)]
+        #[postgres(name = __t_$outer_type)]
         struct $dumbhax(pub $outer_type);
 
         impl pg::types::ToSql for $outer_type {
             fn to_sql(&self, ty: &pg::types::Type, out: &mut Vec<u8>) -> Result<pg::types::IsNull, Box<dyn std::error::Error + 'static + Sync + Send>> {
-                pg::types::ToSql::to_sql(&$dumbhax(self.clone()), ty, out)
+                match *ty.kind() {
+                    pg::types::Kind::Domain(ref type_) => {
+                        pg::types::ToSql::to_sql(&$dumbhax(self.clone()), type_, out)
+                    },
+                    _ => panic!("this should be unreachable"),
+                }
             }
 
             fn accepts(ty: &pg::types::Type) -> bool {
-                <$dumbhax as pg::types::ToSql>::accepts(ty)
+                //return true; //sshhhhhhhhh
+                dbg!(ty);
+                match *ty.kind() {
+                    pg::types::Kind::Domain(ref type_) => {
+                        <$dumbhax as pg::types::ToSql>::accepts(type_)
+                    }
+                    _ => false
+                }
             }
 
             to_sql_checked!{}
@@ -363,13 +405,15 @@ macro_rules! migrate_table {
 
 
 
-        /*
+        // /*
         let count_str = format!("SELECT COUNT(*) FROM {}",table_name);
         let count:i64 = $sql_conn.query_row(&count_str,NO_PARAMS,|r| r.get(0)).unwrap();
         println!("{} rows",count);
-        */
+        // */
         
         let mut rows = sqlite_select_stmt.query(NO_PARAMS).unwrap();
+
+        let mut pb = ProgressBar::new(count as u64);
 
         while let Some(row) = rows.next().unwrap() {
             println!("{:?}", row.columns());
@@ -379,15 +423,78 @@ macro_rules! migrate_table {
             println!("like super sure");*/
             let pg_vals_boxes = __mt_values_arr!($sql_conn,row, $( $token )*).flatten();
             let pg_vals:Vec<&pg::types::ToSql> = pg_vals_boxes.iter().map(|v| &**v).collect();
-            dbg!(&pg_vals);
+            //dbg!(&pg_vals);
             match postgres_stmt.execute(&pg_vals) {
                 Ok(v) => assert_eq!(v, 1),
-                Err(e) => eprintln!("{:#?}",e),
+                Err(e) => panic!("{:#?}",e),
             }
-            panic!();
+            pb.inc();
+            //panic!();
         }
         postgres_stmt.finish().unwrap();
     }};
+}
+
+#[derive(Clone,Debug,ToSql,FromSql)]
+#[postgres(name = "__t_discord_user")]
+struct DiscordUserInner {
+    pub discord_id: Snowflake,
+    pub avatar: Option<String>,
+    pub is_bot: bool,
+    pub discriminator: i16,
+    #[postgres(name = "user_name")]
+    pub name: String,
+}
+
+#[derive(Clone,Debug,ToSql,FromSql)]
+#[postgres(name = "discord_user")]
+struct DiscordUser(pub DiscordUserInner);
+
+#[derive(Clone,Debug,ToSql,FromSql)]
+#[postgres(name = "__t_partial_member")]
+struct PartialMemberInner {
+    pub deaf: bool,
+    pub joined_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub mute: bool,
+    pub roles: Vec<Snowflake>,
+}
+
+#[derive(Clone,Debug,ToSql,FromSql)]
+#[postgres(name = "partial_member")]
+struct PartialMember(pub PartialMemberInner);
+
+macro_rules! mass_insert_helper {
+    ($sql_conn:ident, $table_name:expr, $rowname:ident, $each_row:expr, $($sql_column_name:expr,)+) => {
+        let table_name = $table_name;
+        let sql_columns = &[
+            $( $sql_column_name , )+
+        ];
+
+        let sqlite_select_str = format!("SELECT {} FROM {}",sql_columns.join(","),table_name);
+        dbg!(&sqlite_select_str);
+        let mut sqlite_select_stmt = $sql_conn.prepare_cached(&sqlite_select_str).unwrap();
+
+        // /*
+        let count_str = format!("SELECT COUNT(*) FROM {}",table_name);
+        let count:i64 = $sql_conn.query_row(&count_str,NO_PARAMS,|r| r.get(0)).unwrap();
+        println!("{} rows",count);
+        // */
+        
+        let mut rows = sqlite_select_stmt.query(NO_PARAMS).unwrap();
+
+        let mut pb = ProgressBar::new(count as u64);
+
+        while let Some($rowname) = rows.next().unwrap() {
+            let bla_ = $each_row;
+            pb.inc();
+        }
+    };
+}
+
+fn increment_progress_to(txn: &pg::transaction::Transaction, check_progress:u64) {
+    txn.batch_execute("UPDATE sqlite_migration_progress SET progress_counter = progress_counter + 1").unwrap();
+    let db_progress:i64 = txn.query("SELECT progress_counter FROM sqlite_migration_progress", &[] as &[&pg::types::ToSql]).unwrap().get(0).get(0);
+    assert_eq!(db_progress as u64, check_progress);
 }
 
 pub fn migrate_sqlite_to_postgres(/*pg_conn: &mut pg::Transaction*/) -> () {
@@ -396,12 +503,307 @@ pub fn migrate_sqlite_to_postgres(/*pg_conn: &mut pg::Transaction*/) -> () {
     println!("finished sqlite migrations, writing postgres schema");
     //TODO: Ensure postgres database is *empty*
     let mut pg_conn = pg::Connection::connect("postgres://shelvacu@%2Fvar%2Frun%2Fpostgresql:5434/detroit", TlsMode::None).unwrap();
-    let mut pg_trans = pg_conn.transaction().unwrap();
-    pg_trans.batch_execute(include_str!("../postgres_init.sql")).unwrap();
+
+    let mp_table_exist_sql = "SELECT EXISTS (SELECT 1 FROM pg_tables WHERE schema_name = 'public' AND tablename = 'sqlite_migration_progress')";
+    let mp_table_exists:bool = pg_conn.query(mp_table_exist_sql, &[] as &[&pg::types::ToSql]).unwrap().get(0).get(0);
+    
+    if !mp_table_exists {
+        pg_conn.batch_execute(include_str!("../postgres_init.sql")).unwrap();
+    }
+    
     //let mut pg_conn = pg::Connection::connect("postgres://shelvacu@localhost:5434/detroit", TlsMode::None).unwrap();
     //let sql_conn = 5;
     let mut sql_conn = make_sqlite_connection().expect("could not establish database connection");
 
+    let sqlite_mentions_select_str = "SELECT id, avatar, bot, discriminator, name FROM user_mention WHERE message_rowid = ?";
+    let mut sqlite_mentions_stmt = sql_conn.prepare_cached(&sqlite_mentions_select_str).unwrap();
+
+    let pg_select_progress_stmt = pg_conn.prepare("SELECT progress_counter FROM sqlite_migration_progress").unwrap();
+    let get_progress = || {
+        pg_select_progress_stmt.query(&[] as &[&pg::types::ToSql]).unwrap().get(0).get::<_,i64>(0) as u64
+    };
+
+    if get_progress() == 0 {
+        let mut pg_trans = pg_conn.transaction().unwrap();
+        mass_insert_helper! {
+            sql_conn, "message", row,
+            {
+                let mut mentions:Vec<DiscordUser> = Vec::new();
+                let rowid = row.get_unwrap::<_,i64>("rowid");
+                let mut mrows = sqlite_mentions_stmt.query(&[&rowid as &sqlite::ToSql]).unwrap();
+                while let Some(mrow) = mrows.next().unwrap() {
+                    let du = DiscordUser(DiscordUserInner{
+                        discord_id: mrow.get_unwrap::<_,Snowflake>("id"),
+                        avatar: mrow.get_unwrap::<_,Option<String>>("avatar"),
+                        is_bot: mrow.get_unwrap::<_,bool>("bot"),
+                        discriminator: mrow.get_unwrap::<_,i16>("discriminator"),
+                        name: mrow.get_unwrap::<_,String>("name"),
+                    });
+                    mentions.push(du);
+                }
+                let the_partial_member = if row.get_unwrap::<_,bool>("member_is_some") {
+                    Some(PartialMember(PartialMemberInner{
+                        deaf: row.get_unwrap("member_deaf"),
+                        joined_at: row.get_unwrap("member_joined_at"),
+                        mute: row.get_unwrap("member_mute"),
+                        roles: snowflake_arr(&sql_conn, row.get_unwrap("member_roles")),
+                    }))
+                } else {None};
+                let author = DiscordUser(DiscordUserInner{
+                    discord_id: Snowflake::from(row.get_unwrap::<_,String>("author_id")),
+                    avatar: row.get_unwrap::<_,Option<String>>("author_avatar"),
+                    is_bot: row.get_unwrap::<_,bool>("author_is_bot"),
+                    discriminator: row.get_unwrap::<_,i16>("author_discriminator"),
+                    name: row.get_unwrap::<_,String>("author_name"),
+                });
+                //dbg!(&author);
+                /*pg_insert_helper!(
+                pg_trans, "test",
+                a => author,
+                b => mentions,
+            ).unwrap();*/
+                //dbg!(&mentions);
+                pg_insert_helper!(
+                    pg_trans, "message",
+                    rowid => rowid,
+                    discord_id => Snowflake::from(row.get_unwrap::<_,String>("discord_id")),
+                    author => author,
+                    channel_id => Snowflake::from(row.get_unwrap::<_,String>("channel_id")),
+                    content => filter_string(row.get_unwrap("content_binary")),
+                    edited_timestamp => row.get_unwrap::<_,Option<chrono::DateTime<chrono::Utc>>>("edited_timestamp"),
+                    guild_id => row.get_unwrap::<_,Option<String>>("guild_id").map(|s| Snowflake::from(s)),
+                    kind => row.get_unwrap::<_,String>("kind"),
+                    member => the_partial_member,
+                    mention_everyone => row.get_unwrap::<_,bool>("mention_everyone"),
+                    mention_roles => snowflake_arr(&sql_conn,row.get_unwrap::<_,i64>("mention_roles")),
+                    mentions => mentions,
+                    nonce_debug => row.get_unwrap::<_,String>("nonce_debug"),
+                    pinned => row.get_unwrap::<_,bool>("pinned"),
+                    timestamp => row.get_unwrap::<_,chrono::DateTime<chrono::Utc>>("timestamp"),
+                    tts => row.get_unwrap::<_,bool>("tts"),
+                    webhook_id => row.get_unwrap::<_,Option<String>>("webhook_id").map(|s| Snowflake::from(s)),
+                    archive_recvd_at => row.get_unwrap::<_,chrono::DateTime<chrono::Utc>>("archive_recvd_at"),
+                ).unwrap();
+            },
+            "rowid", //0
+            "discord_id", //1
+            "author_id", //2
+            "author_avatar", //3
+            "author_is_bot", //4
+            "author_discriminator", //5
+            "author_name", //6
+            "channel_id", //7
+            "content_binary", //8
+            "edited_timestamp", //9
+            "guild_id", //10
+            "kind",
+            "member_is_some",
+            "member_deaf",
+            "member_joined_at",
+            "member_mute",
+            "member_roles",
+            "mention_everyone",
+            "mention_roles",
+            "nonce_debug",
+            "pinned",
+            "timestamp",
+            "tts",
+            "webhook_id",
+            "archive_recvd_at",
+        }
+        increment_progress_to(&pg_trans, 1);
+        pg_trans.commit().expect("Failed to commit txn");
+    }
+
+    if get_progress() == 2 {
+        let mut pg_trans = pg_conn.transaction().unwrap();
+        mass_insert_helper!{
+            sql_conn, "reaction", row,
+            {
+                pg_insert_helper!(
+                    pg_trans, "reaction",
+                    rowid => row.get_unwrap::<_,i64>("rowid"),
+                    message_rowid => row.get_unwrap::<_,i64>("message_rowid"),
+                    count => row.get_unwrap::<_,i64>("count"),
+                    me => row.get_unwrap::<_,bool>("me"),
+                    reaction_is_custom => row.get_unwrap::<_,bool>("reaction_is_custom"),
+                    reaction_animated => row.get_unwrap::<_,Option<bool>>("reaction_animated"),
+                    reaction_id => row.get_unwrap::<_,Option<i64>>("reaction_id").map(|i| Snowflake::from(i)),
+                    reaction_name => row.get_unwrap::<_,Option<String>>("reaction_name"),
+                    reaction_string => row.get_unwrap::<_,Option<String>>("reaction_string"),
+                ).unwrap();
+            },
+            "rowid",
+            "message_rowid",
+            "count",
+            "me",
+            "reaction_is_custom",
+            "reaction_animated",
+            "reaction_id",
+            "reaction_name",
+            "reaction_string",
+        }
+        increment_progress_to(&pg_trans, 3);
+        pg_trans.commit().unwrap();
+    }
+
+    if get_progress() == 3 {
+        let mut pg_trans = pg_conn.transaction().unwrap();
+        mass_insert_helper!{
+            sql_conn, "attachment", row,
+            pg_insert_helper!(
+                pg_trans, "attachment",
+                rowid => row.get_unwrap::<_,i64>("rowid"),
+                message_rowid => row.get_unwrap::<_,i64>("message_rowid"),
+                discord_id => Snowflake::from(row.get_unwrap::<_,String>("discord_id")),
+                filename => row.get_unwrap::<_,String>("filename"),
+                height => row.get_unwrap::<_,Option<i64>>("height"),
+                width => row.get_unwrap::<_,Option<i64>>("width"),
+                proxy_url => row.get_unwrap::<_,String>("proxy_url"),
+                size => row.get_unwrap::<_,i64>("size"),
+                url => row.get_unwrap::<_,String>("url"),
+            ).unwrap(),
+            "*",
+        }
+        increment_progress_to(&pg_trans, 4);
+        pg_trans.commit().unwrap();
+    }
+
+    #[derive(Clone,Debug,ToSql,FromSql)]
+    #[postgres(name = "__t_embed_author")]
+    struct EmbedAuthorInner{
+        pub icon_url: Option<String>,
+        pub name: String,
+        pub proxy_icon_url: Option<String>,
+        pub url: Option<String>,
+    }
+    #[derive(Clone,Debug,ToSql,FromSql)]
+    #[postgres(name = "embed_author")]
+    struct EmbedAuthor(pub EmbedAuthorInner);
+
+
+    #[derive(Clone,Debug,ToSql,FromSql)]
+    #[postgres(name = "__t_embed_footer")]
+    struct EmbedFooterInner{
+        pub icon_url: Option<String>,
+        pub proxy_icon_url: Option<String>,
+        pub text: String,
+    }
+    #[derive(Clone,Debug,ToSql,FromSql)]
+    #[postgres(name = "embed_author")]
+    struct EmbedFooter(pub EmbedFooterInner);
+
+    #[derive(Clone,Debug,ToSql,FromSql)]
+    #[postgres(name = "__t_embed_image")]
+    struct EmbedImageInner{
+        pub height: i64,
+        pub width: i64,
+        pub proxy_url: String,
+        pub url: String,
+    }
+    #[derive(Clone,Debug,ToSql,FromSql)]
+    #[postgres(name = "embed_image")]
+    struct EmbedImage(pub EmbedImageInner);
+
+    #[derive(Clone,Debug,ToSql,FromSql)]
+    #[postgres(name = "__t_embed_provider")]
+    struct EmbedProviderInner{
+        pub name: String,
+        pub url: Option<String>,
+    }
+    #[derive(Clone,Debug,ToSql,FromSql)]
+    #[postgres(name = "embed_provider")]
+    struct EmbedProvider(pub EmbedProviderInner);
+
+
+    #[derive(Clone,Debug,ToSql,FromSql)]
+    #[postgres(name = "__t_embed_video")]
+    struct EmbedVideoInner{
+        pub height: i64,
+        pub width: i64,
+        pub url: Option<String>,
+    }
+    #[derive(Clone,Debug,ToSql,FromSql)]
+    #[postgres(name = "embed_video")]
+    struct EmbedVideo(pub EmbedVideoInner);
+
+    #[derive(Clone,Debug,ToSql,FromSql)]
+    #[postgres(name = "discord_colour")]
+    struct DiscordColour(pub i64);
+
+    if get_progress() == 4{
+        let mut pg_trans = pg_conn.transaction().unwrap();
+        mass_insert_helper!{
+            sql_conn, "embed", row,
+            {
+                let author = if row.get_unwrap::<_,bool>("author_is_some") {
+                    Some(EmbedAuthor(EmbedAuthorInner{
+                        icon_url: row.get_unwrap("author_icon_url"),
+                        name: row.get_unwrap("author_name"),
+                        proxy_icon_url: row.get_unwrap("author_proxy_icon_url"),
+                        url: row.get_unwrap("author_url"),
+                    }))
+                } else { None };
+                let footer = if row.get_unwrap::<_,bool>("footer_is_some") {
+                    Some(EmbedFooter(EmbedFooterInner{
+                        icon_url: row.get_unwrap("footer_icon_url"),
+                        proxy_icon_url: row.get_unwrap("footer_proxy_icon_url"),
+                        text: row.get_unwrap("footer_text"),
+                    }))
+                } else { None };
+                let image = if row.get_unwrap::<_,bool>("image_is_some") {
+                    Some(EmbedImage(EmbedImageInner{
+                        height: row.get_unwrap("image_height"),
+                        width: row.get_unwrap("image_width"),
+                        proxy_url: row.get_unwrap("image_proxy_url"),
+                        url: row.get_unwrap("image_url"),
+                    }))
+                } else { None };
+                let provider = if row.get_unwrap::<_,bool>("provider_is_some") {
+                    Some(EmbedProvider(EmbedProviderInner{
+                        name: row.get_unwrap("provider_name"),
+                        url: row.get_unwrap("provider_url"),
+                    }))
+                } else { None };
+                let thumbnail = if row.get_unwrap::<_,bool>("thumbnail_is_some") {
+                    Some(EmbedImage(EmbedImageInner{
+                        height: row.get_unwrap("thumbnail_height"),
+                        width: row.get_unwrap("thumbnail_width"),
+                        proxy_url: row.get_unwrap("thumbnail_proxy_url"),
+                        url: row.get_unwrap("thumbnail_url"),
+                    }))
+                } else { None };
+                let video = if row.get_unwrap::<_,bool>("video_is_some") {
+                    Some(EmbedVideo(EmbedVideoInner{
+                        height: row.get_unwrap("video_height"),
+                        width: row.get_unwrap("video_width"),
+                        url: row.get_unwrap("video_url"),
+                    }))
+                } else { None };
+
+                pg_insert_helper!(
+                    pg_trans, "embed",
+                    rowid => row.get_unwrap::<_,i64>("rowid"),
+                    message_rowid => row.get_unwrap::<_,i64>("message_rowid"),
+                    author => author,
+                    colour_u32 => row.get_unwrap::<_,Option<i64>>("colour_u32").map(|c| DiscordColour(c)),
+                    description => row.get_unwrap::<_,Option<String>>("description"),
+                    footer => footer,
+                    image => image,
+                    kind => row.get_unwrap::<_,String>("kind"),
+                    provider => provider,
+                    thumbnail => thumbnail,
+                    timestamp => row.get_unwrap::<_,Option<String>>("timestamp"),
+                    title => row.get_unwrap::<_,Option<String>>("title"),
+                    url => row.get_unwrap::<_,Option<String>>("url"),
+                    video => video,
+                ).unwrap();
+            },
+            "*",
+        }
+        increment_progress_to(&pg_trans, 5);
+        pg_trans.commit().unwrap();
+    }
     /*
     trace_macros!(true);
     __mt_c_val!{
@@ -412,15 +814,15 @@ pub fn migrate_sqlite_to_postgres(/*pg_conn: &mut pg::Transaction*/) -> () {
         } : {}
     }// */
     trace_macros!(false);
-    // /*
+    /*
     migrate_table!{
     //__mt_define_types!{
         (pg_trans, sql_conn, message)
         rowid => i64 => !, //0
         discord_id => str_sf() -> Snowflake => !, //1
-        author => discord_user {
-            id => str_sf() -> Snowflake => !, //2
-            avatar => String => !, //3
+        author => MTUser {
+            discord_id => str_sf() -> Snowflake => id, //2
+            avatar => Option<String> => !, //3
             is_bot => bool => !, //4
             discriminator => i16 => !, //5
             name => String => !, //6
@@ -428,7 +830,7 @@ pub fn migrate_sqlite_to_postgres(/*pg_conn: &mut pg::Transaction*/) -> () {
         channel_id => str_sf() -> Snowflake => !, //7
         content => filter_string() -> String => content_binary, //8
         edited_timestamp => Option<chrono::DateTime<chrono::Utc>> => !, //9
-        guild_id => str_sf() -> Snowflake => !,
+        guild_id => optstr_sf() -> Option<Snowflake> => !, //10
         kind => String => !,
         member => MTMember option{
             deaf => bool => !,
@@ -447,7 +849,7 @@ pub fn migrate_sqlite_to_postgres(/*pg_conn: &mut pg::Transaction*/) -> () {
     }// */
     trace_macros!(false);
     
-    pg_trans.commit().expect("Failed to commit txn");
+    println!("FINISHED!");
     //sql_conn.prepare_cached("SELECT");
 }
 
@@ -1125,6 +1527,8 @@ UPDATE migration_version SET version = 5;
             },
             5 => {
                 tx.execute_batch("
+CREATE INDEX id_id_arr_rowid ON id(id_arr_rowid,id);
+CREATE INDEX user_mention_message_rowid ON user_mention(message_rowid);
 UPDATE message SET content_binary = CAST(content as BLOB) WHERE content_binary IS NULL;
 UPDATE migration_version SET version = 6;
 ").expect("Failed migration 5=>6");

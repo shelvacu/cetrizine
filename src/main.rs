@@ -1,5 +1,6 @@
 #![feature(type_alias_enum_variants)]
 #![feature(trace_macros)]
+#![feature(nll)]
 #![deny(unused_must_use)]
 
 #![allow(unused_macros)] //todo
@@ -18,6 +19,7 @@ extern crate postgres as pg;
 extern crate postgres_derive;
 extern crate chrono;
 extern crate time;
+extern crate pbr;
 
 use sqlite::types::{ToSql,ToSqlOutput,FromSql,FromSqlResult,ValueRef};
 use sqlite::{Connection, NO_PARAMS};
@@ -25,6 +27,37 @@ use sqlite::OptionalExtension;
 
 use std::sync::{Mutex,Arc};
 use std::env;
+
+macro_rules! pg_insert_helper {
+    ($db:ident, $table_name:expr, $( $column_name:ident => $column_value:expr , )+ ) => {{
+        let table_name = $table_name;
+        let values:&[&pg::types::ToSql] = &[
+            $(
+                &$column_value as &pg::types::ToSql,
+            )+
+        ];
+
+        let pg_column_names = &[
+            $( stringify!($column_name), )+
+        ];
+
+        //let placeholders:Vec<&str> = sql_column_names.into_iter().map(|_| "?").collect();
+        let pg_parameters = (0..pg_column_names.len()).into_iter().map(|j| format!("${}",j+1)).collect::<Vec<String>>().join(","); //makes a string like "$1,$2,$3" if pg_column_names.len() == 3
+
+
+        let sql = &[
+            "INSERT INTO ", table_name,
+            " (", &pg_column_names.join(","), ") ",
+            "VALUES (", &pg_parameters, ") ",
+        ].join("");
+
+        ( || -> pg::Result<()>{
+            //let mut stmt = $db.prepare_cached(sql)?;
+            assert_eq!($db.prepare_cached(sql)?.execute(values)?,1);
+            Ok(())
+        } )()
+    }};
+}
 
 mod legacy;
 

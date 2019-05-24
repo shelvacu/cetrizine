@@ -3,27 +3,28 @@ CREATE OR REPLACE FUNCTION f_check_no_null (anyarray)
  'SELECT CASE WHEN $1 IS NOT NULL THEN array_position($1, NULL) IS NULL END';
 
 CREATE DOMAIN snowflake AS int8
-  CHECK (VALUE >= 0);
+  CHECK (VALUE IS NULL OR VALUE >= 0);
 
 CREATE DOMAIN discord_colour AS int8
-  CHECK(VALUE >= 0 AND VALUE < 4294967296);
+  CHECK(VALUE IS NULL OR (VALUE >= 0 AND VALUE < 4294967296));
 
 CREATE TYPE __t_discord_user AS (
   discord_id            snowflake,-- not null,
-  avatar_url            text,-- not null,
+  avatar                text,
   is_bot                bool,-- not null,
   discriminator         int2,-- not null,
-  name                  text -- not null
+  user_name             text -- not null
 );
 
 CREATE DOMAIN discord_user AS __t_discord_user
-  CHECK(
+  CHECK(VALUE IS NULL OR (
     (VALUE).discord_id IS NOT NULL AND
-    (VALUE).avatar_url IS NOT NULL AND
     (VALUE).is_bot IS NOT NULL AND
     (VALUE).discriminator IS NOT NULL AND
-    (VALUE).name IS NOT NULL
-  )
+    (VALUE).user_name IS NOT NULL AND 
+    (VALUE).discriminator >= 0 AND
+    (VALUE).discriminator <= 9999
+  ))
 ;
 
 CREATE TYPE __t_partial_member AS (
@@ -34,13 +35,13 @@ CREATE TYPE __t_partial_member AS (
 );
 
 CREATE DOMAIN partial_member AS __t_partial_member
-  CHECK(
+  CHECK(VALUE IS NULL OR (
     (VALUE).deaf IS NOT NULL AND
     --joined_at can be null
     (VALUE).mute IS NOT NULL AND
     (VALUE).roles IS NOT NULL AND
     f_check_no_null((VALUE).roles)
-  )
+  ))
 ;
 
 CREATE TABLE message (
@@ -105,9 +106,9 @@ CREATE TYPE __t_embed_author AS (
   url                   text
 );
 CREATE DOMAIN embed_author AS __t_embed_author
-  CHECK(
+  CHECK(VALUE IS NULL OR(
     (VALUE).name IS NOT NULL
-  )
+  ))
 ;
 CREATE TYPE __t_embed_footer AS (
   icon_url              text,
@@ -115,9 +116,9 @@ CREATE TYPE __t_embed_footer AS (
   text                  text -- not null
 );
 CREATE DOMAIN embed_footer AS __t_embed_footer
-  CHECK(
+  CHECK(VALUE IS NULL OR (
     (VALUE).text IS NOT NULL
-  )
+  ))
 ;
 CREATE TYPE __t_embed_image AS (
   height                int8,-- not null,
@@ -126,21 +127,21 @@ CREATE TYPE __t_embed_image AS (
   url                   text -- not null
 );
 CREATE DOMAIN embed_image AS __t_embed_image
-  CHECK(
+  CHECK(VALUE IS NULL OR(
     (VALUE).height IS NOT NULL AND
     (VALUE).width IS NOT NULL AND
     (VALUE).proxy_url IS NOT NULL AND
     (VALUE).url IS NOT NULL
-  )
+  ))
 ;
 CREATE TYPE __t_embed_provider AS (
   name                  text,-- not null,
   url                   text
 );
 CREATE DOMAIN embed_provider AS __t_embed_provider
-  CHECK(
+  CHECK(VALUE IS NULL OR (
     (VALUE).name IS NOT NULL
-  )
+  ))
 ;
 /* --this type is exactly the same as embed_image, so use that
 CREATE TYPE __t_embed_thumbnail (
@@ -163,10 +164,10 @@ CREATE TYPE __t_embed_video AS (
   url                   text
 );
 CREATE DOMAIN embed_video AS __t_embed_video
-  CHECK(
+  CHECK(VALUE IS NULL OR (
     (VALUE).height IS NOT NULL AND
     (VALUE).width IS NOT NULL
-  )
+  ))
 ;
 
 CREATE TABLE embed (
@@ -202,11 +203,11 @@ CREATE TYPE __t_serenity_current_user AS (
   verified              bool -- not null
 );
 CREATE DOMAIN serenity_current_user AS __t_serenity_current_user
-  CHECK(
+  CHECK(VALUE IS NULL OR(
     (VALUE).inner_user IS NOT NULL AND
     (VALUE).mfa_enabled IS NOT NULL AND
     (VALUE).verified IS NOT NULL
-  )
+  ))
 ;
 CREATE TABLE ready (
   rowid                 serial8 primary key,
@@ -328,11 +329,11 @@ CREATE TYPE __t_user_presence_game AS (
   url                   text
 );
 CREATE DOMAIN user_presence_game as __t_user_presence_game
-  CHECK(
+  CHECK(VALUE IS NULL OR (
     (VALUE).kind IS NOT NULL AND
     (VALUE).kind in ('Playing','Streaming','Listening') AND
     (VALUE).name IS NOT NULL
-  )
+  ))
 ;
 
 CREATE TABLE user_presence (
@@ -423,3 +424,10 @@ CREATE INDEX mag_channel_end    ON message_archive_gets(channel_id,   end_messag
 CREATE INDEX mag_channel_after  ON message_archive_gets(channel_id, after_message_id);
 CREATE INDEX mag_channel_before ON message_archive_gets(channel_id,before_message_id);
 CREATE INDEX mag_channel_around ON message_archive_gets(channel_id,around_message_id);
+
+CREATE TABLE sqlite_migration_progress (
+  progress_counter int8 not null,
+  enforce_single_row bool NOT NULL UNIQUE DEFAULT true CHECK(enforce_single_row)
+);
+
+INSERT INTO sqlite_migration_progress (progress_counter) VALUES (0);
