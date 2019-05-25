@@ -497,11 +497,11 @@ fn increment_progress_to(txn: &pg::transaction::Transaction, check_progress:u64)
     assert_eq!(db_progress as u64, check_progress);
 }
 
-pub fn migrate_sqlite_to_postgres(/*pg_conn: &mut pg::Transaction*/) -> () {
+pub fn migrate_sqlite_to_postgres(pg_path: &str) -> () {
     println!("running any remaining sqlite migrations");
     sqlite_migrate();
     println!("finished sqlite migrations, writing postgres schema");
-    let mut pg_conn = pg::Connection::connect("postgres://shelvacu@%2Fvar%2Frun%2Fpostgresql:5434/detroit", TlsMode::None).unwrap();
+    let mut pg_conn = pg::Connection::connect(pg_path/*"postgres://shelvacu@%2Fvar%2Frun%2Fpostgresql:5434/detroit"*/, TlsMode::None).unwrap();
 
     let mp_table_exist_sql = "SELECT EXISTS (SELECT 1 FROM pg_tables WHERE schemaname = 'public' AND tablename = 'sqlite_migration_progress')";
     let mp_table_exists:bool = pg_conn.query(mp_table_exist_sql, &[] as &[&pg::types::ToSql]).unwrap().get(0).get(0);
@@ -1190,12 +1190,44 @@ pub fn migrate_sqlite_to_postgres(/*pg_conn: &mut pg::Transaction*/) -> () {
         pg_trans.commit().unwrap();
     }
 
-    {
+    if get_progress() == 18 {
         let mut pg_trans = pg_conn.transaction().unwrap();
         increment_progress_to(&pg_trans, 19);
         pg_trans.commit().unwrap();
     }
-        
+
+    if get_progress() == 19 {
+        let mut pg_trans = pg_conn.transaction().unwrap();
+        let batch_str:String = vec![
+            "message",
+            "reaction",
+            "attachment",
+            "embed",
+            "embed_field",
+            "ready",
+            "group_channel",
+            "private_channel",
+            "guild",
+            "guild_channel",
+            "permission_overwrite",
+            "emoji",
+            "member",
+            "user_presence",
+            "guild_role",
+            "voice_state",
+            "message_archive_gets",
+        ].into_iter().map(|s| format!("
+SELECT setval(pg_get_serial_sequence('{0}','rowid'), rowid) FROM {0} ORDER BY rowid DESC LIMIT 1;", s)).collect();
+        //println!("{}",batch_str);
+        pg_trans.batch_execute(&batch_str).unwrap();
+        increment_progress_to(&pg_trans, 20);
+        pg_trans.commit().unwrap();
+    }
+
+    let mut pg_trans = pg_conn.transaction().unwrap();
+    increment_progress_to(&pg_trans, 21);
+    pg_trans.commit().unwrap();
+    
     println!("FINISHED!");
     //sql_conn.prepare_cached("SELECT");
 }

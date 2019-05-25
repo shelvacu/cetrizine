@@ -20,17 +20,38 @@ extern crate postgres_derive;
 extern crate chrono;
 extern crate time;
 extern crate pbr;
+extern crate backtrace;
 
-use sqlite::types::{ToSql,ToSqlOutput,FromSql,FromSqlResult,ValueRef};
+use backtrace::Backtrace;
+
+use r2d2_postgres::r2d2;
+
+use pg::types::{IsNull,Type,ToSql,FromSql};
+use pg::TlsMode;
+
+use chrono::prelude::{DateTime,Utc};
+
+/*use sqlite::types::{ToSql,ToSqlOutput,FromSql,FromSqlResult,ValueRef};
 use sqlite::{Connection, NO_PARAMS};
-use sqlite::OptionalExtension;
+use sqlite::OptionalExtension;*/
+
+use serenity::{
+    model::{gateway::Ready, channel::Message, channel::Channel},
+    model::prelude::*,
+    utils::Colour,
+    //model::id::*,
+    prelude::*,
+};
 
 use std::sync::{Mutex,Arc};
+use std::fmt::Debug;
+use std::error::Error;
 use std::env;
 
 macro_rules! pg_insert_helper {
     ($db:ident, $table_name:expr, $( $column_name:ident => $column_value:expr , )+ ) => {{
         let table_name = $table_name;
+        let debug:bool = false && table_name == "message";
         let values:&[&pg::types::ToSql] = &[
             $(
                 &$column_value as &pg::types::ToSql,
@@ -41,7 +62,8 @@ macro_rules! pg_insert_helper {
             $( stringify!($column_name), )+
         ];
 
-        //let placeholders:Vec<&str> = sql_column_names.into_iter().map(|_| "?").collect();
+        //if debug { dbg!(pg_column_names); }
+
         let pg_parameters = (0..pg_column_names.len()).into_iter().map(|j| format!("${}",j+1)).collect::<Vec<String>>().join(","); //makes a string like "$1,$2,$3" if pg_column_names.len() == 3
 
 
@@ -51,28 +73,25 @@ macro_rules! pg_insert_helper {
             "VALUES (", &pg_parameters, ") ",
         ].join("");
 
+        if debug { dbg!(sql); }
+        if debug { dbg!(values); }
+        
         ( || -> pg::Result<()>{
-            //let mut stmt = $db.prepare_cached(sql)?;
             assert_eq!($db.prepare_cached(sql)?.execute(values)?,1);
             Ok(())
         } )()
     }};
 }
 
-mod legacy;
+mod legacy; //this *must* come after the pg_insert_helper macro
+mod db_types;
+
+use db_types::*;
 
 const DISCORD_MAX_SNOWFLAKE:u64 = 9223372036854775807;
 
-use serenity::{
-    model::{gateway::Ready, channel::Message, channel::Channel},
-    model::prelude::*,
-    //model::id::*,
-    prelude::*,
-};
-
 struct Handler{
-    //TODO: I'm pretty sure serenity multithreads by default, this should really be a connection pool.
-    conn: Mutex<Connection>,
+    pool: r2d2::Pool<r2d2_postgres::PostgresConnectionManager>,
     currently_archiving: Arc<Mutex<()>>,
 }
 
@@ -83,16 +102,15 @@ pub trait EnumIntoString : Sized {
 
 const AUTO_RETRY_DELAYS:&[u64] = &[0,1,2,4,8,16,32,64,128,256,512,1024,2048,4096,8192,16384,32768,65536];
 
-trait ConnectionExtension {
-    fn execute_auto_retry(&self, sql: &str, params: &[&ToSql]) -> sqlite::Result<usize>;
-}
-
-struct NullEscape<T>(pub T);
+#[derive(Debug)]
+struct NullEscape<T:Debug>(pub T);
 
 impl ToSql for NullEscape<String>{
-    fn to_sql(&self) -> sqlite::Result<ToSqlOutput> {
+    fn to_sql(&self,
+              ty: &Type,
+              out: &mut Vec<u8>) -> Result<IsNull, Box<dyn Error + 'static + Sync + Send>> {
         if self.0.chars().all(|c| c != '\0' && c != '$') {
-            self.0.to_sql()
+            self.0.to_sql(ty,out)
         } else {
             let mut res = String::with_capacity(self.0.len() + 4);
             for c in self.0.chars() {
@@ -110,19 +128,16 @@ impl ToSql for NullEscape<String>{
                     },
                 }
             }
-            Ok(sqlite::types::ToSqlOutput::Owned(res.into()))
+            res.to_sql(ty,out)
         }
     }
-}
 
-/*impl ToSql for NullEscape<Option<String>> {
-    fn to_sql(&self) -> sqlite::Result<ToSqlOutput> {
-        match &self.0 {
-            None => Ok(sqlite::types::ToSqlOutput::Owned(sqlite::types::Value::Null)),
-            Some(s) => NullEscape(s.clone()).to_sql(),
-        }
+    fn accepts(ty: &Type) -> bool {
+        <String as ToSql>::accepts(ty)
     }
-}*/
+
+    to_sql_checked!{}
+}
 
 trait OptionExt {
     type Inner;
@@ -140,15 +155,43 @@ impl<T> OptionExt for Option<Option<T>> {
     }
 }
 
-trait FilterExt {
+pub trait FilterExt {
     type Return;
     fn filter_null(&self) -> Self::Return;
 }
 
 impl FilterExt for str {
-    type Return = NullEscape<String>;
+    type Return = String;
     fn filter_null(&self) -> Self::Return {
-        NullEscape(self.into())
+        if self.chars().all(|c| c != '\0' && c != '$') {
+            String::from(self)
+        } else {
+            let mut res = String::with_capacity(self.len() + 4);
+            for c in self.chars() {
+                match c {
+                    _ if c == '\0' => {
+                        res.push('$');
+                        res.push('0');
+                    },
+                    _ if c == '$' => {
+                        res.push('$');
+                        res.push('$');
+                    },
+                    c => {
+                        res.push(c);
+                    },
+                }
+            }
+            res
+        }
+        //NullEscape(self.into())
+    }
+}
+
+impl FilterExt for String {
+    type Return = String;
+    fn filter_null(&self) -> Self::Return {
+        self.as_str().filter_null()
     }
 }
 
@@ -160,51 +203,23 @@ impl FilterExt for str {
 }*/
 
 impl FilterExt for Option<&str> {
-    type Return = Option<NullEscape<String>>;
+    type Return = Option<String>;
     fn filter_null(&self) -> Self::Return {
         self.map(FilterExt::filter_null)
     }
 }
 
 impl FilterExt for Option<String> {
-    type Return = Option<NullEscape<String>>;
+    type Return = Option<String>;
     fn filter_null(&self) -> Self::Return {
-        self.clone().map(|s| s.filter_null())
+        self.clone().map(|s| FilterExt::filter_null(s.as_str()))
     }
 }
 
 impl FilterExt for Option<Option<String>> {
-    type Return = Option<NullEscape<String>>;
+    type Return = Option<String>;
     fn filter_null(&self) -> Self::Return {
         self.clone().collapse().filter_null()
-    }
-}
-
-/*impl FilterExt for String {
-    fn filter(&self) -> NullEscape {
-        NullEscape(self.clone())
-    }
-}*/
-
-impl ConnectionExtension for sqlite::Connection {
-    fn execute_auto_retry(&self, sql: &str, params: &[&ToSql]) -> sqlite::Result<usize> {
-        let mut tries = 0;
-        let mut res;
-        loop {
-            res = self.execute(sql, params);
-            match res {
-                Err(sqlite::Error::SqliteFailure(err, _)) if err.code == sqlite::ffi::ErrorCode::DatabaseBusy => {
-                    if tries >= AUTO_RETRY_DELAYS.len() { break }
-                    let wait_time = AUTO_RETRY_DELAYS[tries];
-                    eprintln!("Database busy, waiting {}ms", wait_time);
-                    std::thread::sleep(std::time::Duration::from_millis(wait_time));
-                    tries += 1;
-                    
-                },
-                res => return res,
-            }
-        }
-        return res
     }
 }
 
@@ -214,31 +229,6 @@ macro_rules! print_any_error {
             Ok(_) => (),
             Err(e) => eprintln!("ERROR in {}:{} {:?}",file!(),line!(),e),
         }
-    }};
-}
-
-macro_rules! insert_helper {
-    ($db:ident, $table_name:expr, $( $column_name:expr => $column_value:expr , )+ ) => {{
-        let table_name = $table_name;
-        let values:&[&ToSql] = &[
-            $(
-                &$column_value as &ToSql,
-            )+
-        ];
-
-        let sql_column_names = &[
-            $( $column_name, )+
-        ];
-
-        let placeholders:Vec<&str> = sql_column_names.into_iter().map(|_| "?").collect();
-
-        let sql = &[
-            "INSERT INTO ", table_name,
-            " (", &sql_column_names.join(","), ") ",
-            "VALUES (", &placeholders.join(","), ") ",
-        ].join("");
-
-        $db.execute_auto_retry(sql, values)
     }};
 }
 
@@ -291,74 +281,79 @@ fn get_last_message_id(chan:&Channel) -> Option<MessageId> {
     }
 }
 
+fn pg_sequence_currval<C: pg::GenericConnection>(c: &C, table: &str, column: &str) -> Result<i64, CetrizineError> {
+    let res:i64 = c.query(&format!("SELECT currval(pg_get_serial_sequence('{}','{}'));",table,column),&[])?.get(0).get(0);
+    return Ok(res);
+}
+
 #[derive(Debug)]
-pub enum CetrizineError<'a>{
-    Mutex(std::sync::PoisonError<std::sync::MutexGuard<'a,Connection>>),
-    Sql(sqlite::Error),
+pub struct CetrizineError{
+    pub error_type: CetrizineErrorType,
+    pub backtrace: Backtrace,
+}
+
+impl CetrizineError {
+    fn new(error_type: CetrizineErrorType) -> Self {
+        CetrizineError{
+            error_type,
+            backtrace: Backtrace::new(),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub enum CetrizineErrorType{
+    //Mutex(std::sync::PoisonError<std::sync::MutexGuard<'a,Connection>>),
+    Pool(r2d2::Error),
+    Sql(pg::Error),
     Serenity(serenity::Error),
 }
 
-impl<'a> std::fmt::Display for CetrizineError<'a> {
+impl std::fmt::Display for CetrizineError {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         //TODO: Should maybe do this differently, probably delegate to sub-errors' fmt()?
         write!(f, "{:?}", self)
     }
 }
 
-impl<'a> std::error::Error for CetrizineError<'a> {
+impl std::error::Error for CetrizineError {
     fn description(&self) -> &str {
-        use CetrizineError::*;
+        use CetrizineErrorType::*;
         //TODO: Include sub-errors' description? Does that happen already?
-        match self {
-            Mutex(_)    => "Mutex poisoned",
+        match self.error_type {
+            //Mutex(_)    => "Mutex poisoned",
+            Pool(_)     => "Pool Error",
             Sql(_)      => "SQLite Error",
             Serenity(_) => "Serenity Error",
         }
     }
 
     fn cause(&self) -> Option<&std::error::Error> {
-        use CetrizineError::*;
-        match self {
-            Mutex(e)    => Some(e),
+        use CetrizineErrorType::*;
+        match &self.error_type {
+            //Mutex(e)    => Some(e),
+            Pool(e)     => Some(e),
             Sql(e)      => Some(e),
             Serenity(e) => Some(e),
         }
     }
 }
 
-impl<'a> From<std::sync::PoisonError<std::sync::MutexGuard<'a,Connection>>> for CetrizineError<'a>{
-    fn from(err: std::sync::PoisonError<std::sync::MutexGuard<'a,Connection>>) -> Self {
-        CetrizineError::Mutex(err)
+impl From<pg::Error> for CetrizineError {
+    fn from(err: pg::Error) -> Self {
+        CetrizineError::new(CetrizineErrorType::Sql(err))
     }
 }
 
-impl<'a> From<sqlite::Error> for CetrizineError<'a> {
-    fn from(err: sqlite::Error) -> Self {
-        CetrizineError::Sql(err)
-    }
-}
-
-impl<'a> From<serenity::Error> for CetrizineError<'a> {
+impl From<serenity::Error> for CetrizineError {
     fn from(err: serenity::Error) -> Self {
-        CetrizineError::Serenity(err)
+        CetrizineError::new(CetrizineErrorType::Serenity(err))
     }
 }
 
-pub struct DumbHax<T>(pub T);
-
-impl<T: Clone + Snowflake> ToSql for DumbHax<T>{
-    fn to_sql(&self) -> sqlite::Result<ToSqlOutput> {
-        let val:u64 = self.0.clone().get_snowflake();
-        Ok(ToSqlOutput::from(format!("{}",val)))
-    }
-}
-
-impl<T: Clone + Snowflake> ToSql for DumbHax<Option<T>>{
-    fn to_sql(&self) -> sqlite::Result<ToSqlOutput> {
-        match &self.0 {
-            None => Ok(sqlite::types::ToSqlOutput::Owned(sqlite::types::Value::Null)),
-            Some(v) => Ok(ToSqlOutput::from(format!("{}", v.clone().get_snowflake()))),//DumbHax(v).to_sql(),
-        }
+impl From<r2d2::Error> for CetrizineError {
+    fn from(err: r2d2::Error) -> Self {
+        CetrizineError::new(CetrizineErrorType::Pool(err))
     }
 }
 
@@ -377,6 +372,12 @@ macro_rules! snowflake_impl {
                 self.0
             }
         }
+
+        impl Snowflake for &$klass {
+            fn get_snowflake(&self) -> u64 {
+                self.0
+            }
+        }
     };
 }
 
@@ -391,189 +392,156 @@ snowflake_impl!{RoleId}
 snowflake_impl!{UserId}
 snowflake_impl!{WebhookId}
 
-pub struct SmartHax<T>(pub T);
+#[derive(Debug)]
+pub struct SmartHax<T: Debug>(pub T);
 
-impl<T: Snowflake> ToSql for SmartHax<T>{
-    fn to_sql(&self) -> sqlite::Result<ToSqlOutput> {
-        Ok(ToSqlOutput::Owned(sqlite::types::Value::Integer(self.0.get_snowflake_i64())))
+impl<T: Snowflake + Debug> ToSql for SmartHax<T>{
+    fn to_sql(&self,
+              ty: &Type,
+              out: &mut Vec<u8>) -> Result<IsNull, Box<dyn Error + 'static + Sync + Send>> {
+        DbSnowflake::from(self.0.get_snowflake_i64()).to_sql(ty, out)
     }
+
+    fn accepts(ty: &Type) -> bool {
+        <DbSnowflake as ToSql>::accepts(ty)
+    }
+
+    to_sql_checked!{}
 }
 
-impl<U: Snowflake + Copy> ToSql for SmartHax<Option<U>>{
-    fn to_sql(&self) -> sqlite::Result<ToSqlOutput> {
-        let val = match self.0 {
-            Some(v) => sqlite::types::Value::Integer(v.get_snowflake_i64()),
-            None => sqlite::types::Value::Null,
-        };
-        Ok(ToSqlOutput::Owned(val))
+impl<U: Snowflake + Debug> ToSql for SmartHax<Option<U>>{
+    fn to_sql(&self,
+              ty: &Type,
+              out: &mut Vec<u8>) -> Result<IsNull, Box<dyn Error + 'static + Sync + Send>> {
+        self.0.as_ref().map(|v| DbSnowflake::from(Snowflake::get_snowflake_i64(v))).to_sql(ty, out)
     }
+
+    fn accepts(ty: &Type) -> bool {
+        <Option<DbSnowflake> as ToSql>::accepts(ty)
+    }
+
+    to_sql_checked!{}
 }
 
+#[derive(Debug)]
 pub struct PermsToSql(pub serenity::model::permissions::Permissions);
 
 impl ToSql for PermsToSql{
-    fn to_sql(&self) -> sqlite::Result<ToSqlOutput> {
+    fn to_sql(&self,
+              ty: &Type,
+              out: &mut Vec<u8>) -> Result<IsNull, Box<dyn Error + 'static + Sync + Send>> {
         let val_u:u64 = self.0.bits();
         //TODO: Do I *really* need unsafe here? Is this platform-independent? (probably not) (also see below)
         let val_i:i64 = unsafe { std::mem::transmute(val_u) };
-        Ok(ToSqlOutput::Owned(sqlite::types::Value::Integer(val_i)))
+        val_i.to_sql(ty, out)
     }
+
+    fn accepts(ty: &Type) -> bool {
+        <i64 as ToSql>::accepts(ty)
+    }
+
+    to_sql_checked!{}
 }
 
 impl FromSql for PermsToSql{
-    fn column_result(value: ValueRef) -> FromSqlResult<Self> {
-        i64::column_result(value).map(|val_i| {
-            //TODO: see above
-            let val_u:u64 = unsafe { std::mem::transmute(val_i) };
-            Self(serenity::model::permissions::Permissions::from_bits_truncate(val_u))
-        })
-    }
-}
-
-fn make_arr<T: Clone + Snowflake>(tx: &sqlite::Transaction, arr: &[T]) -> Result<i64, sqlite::Error> {
-    tx.execute(
-        "INSERT INTO id_arr (row_id) VALUES (null)",
-        NO_PARAMS
-    )?;
-
-    let id = tx.last_insert_rowid();
-
-    for item in arr {
-        insert_helper!(
-            tx, "id",
-            "id_arr_rowid" => id,
-            "id" => DumbHax(item.clone()),
-        )?;
+    fn from_sql(ty: &Type,
+                raw: &[u8]) -> Result<Self, Box<dyn Error + 'static + Sync + Send>> {
+        let val_i = <i64 as FromSql>::from_sql(ty, raw)?;
+        let val_u:u64 = unsafe { std::mem::transmute(val_i) };
+        Ok(Self(serenity::model::permissions::Permissions::from_bits_truncate(val_u)))
     }
 
-    return Ok(id)
+    fn accepts(ty: &pg::types::Type) -> bool {
+        <i64 as FromSql>::accepts(ty)
+    }
 }
 
 impl Handler {
-    fn archive_message<'a>(tx: &sqlite::Transaction, msg: &Message, recvd_at:chrono::DateTime<chrono::offset::Local>) -> Result<(), CetrizineError<'a>> {
-        let memb = &msg.member;
+    fn archive_message(tx: &pg::transaction::Transaction, msg: &Message, recvd_at:DateTime<Utc>) -> Result<(), CetrizineError> {
+        //let memb = &msg.member;
 
         //let member_roles_arr_id = memb.map(|m| make_arr(tx, &m.roles)?); <-- This doesn't work because the '?' is inside the closure and thus the closure's return type would be a Result<...> which would make member_roles_arr_id a Option<Result<...>> which is no bueno, so I did the below instead
-        let member_roles_arr_id = match memb {
+        /*let member_roles_arr_id = match memb {
             Some(m) => Some(make_arr(tx, &m.roles)?),
             None => None,
         };
         
-        let mention_roles_arr_id = make_arr(tx, &msg.mention_roles)?;
+        let mention_roles_arr_id = make_arr(tx, &msg.mention_roles)?;*/
 
-        let mut filtered_content = msg.content.clone();
+        /*let mut filtered_content = msg.content.clone();
         filtered_content.retain(|c| c != '\0');
-        let is_filtered = filtered_content != msg.content;
-        insert_helper!(
+        let is_filtered = filtered_content != msg.content;*/
+        pg_insert_helper!(
             tx, "message",
-            "discord_id" => DumbHax(msg.id),
-            "author_id" => DumbHax(msg.author.id),
-            "author_avatar" => msg.author.avatar.filter_null(),
-            "author_is_bot" => msg.author.bot,
-            "author_discriminator" => msg.author.discriminator,
-            "author_name" => msg.author.name.filter_null(),
-            "channel_id" => DumbHax(msg.channel_id),
-            "content" => filtered_content,
-            "content_binary" => if is_filtered { Some(msg.content.as_bytes()) } else { None },
-            "edited_timestamp" => msg.edited_timestamp,
-            "guild_id" => DumbHax(msg.guild_id),
-            "kind" => msg.kind.into_str(),
-            "member_is_some" => memb.is_some(),
-            "member_deaf" => memb.clone().map(|m| m.deaf),
-            "member_joined_at" => memb.clone().map(|m| m.joined_at),
-            "member_mute" => memb.clone().map(|m| m.mute),
-            "member_roles" => member_roles_arr_id,
-            "mention_everyone" => msg.mention_everyone,
-            "mention_roles" => mention_roles_arr_id,
-            "nonce_debug" => format!("{:?}",msg.nonce), //TODO: should probably file a bug and/or pull request with serenity about this one
-            "pinned" => msg.pinned,
-            "timestamp" => msg.timestamp,
-            "tts" => msg.tts,
-            "webhook_id" => DumbHax(msg.webhook_id),
-            "archive_recvd_at" => recvd_at,
+            discord_id => SmartHax(msg.id),
+            author => DbDiscordUser::from(msg.author.clone()),
+            channel_id => SmartHax(msg.channel_id),
+            content => msg.content.filter_null(),
+            edited_timestamp => msg.edited_timestamp,
+            guild_id => SmartHax(msg.guild_id),
+            kind => msg.kind.into_str(),
+            member => msg.member.clone().map(DbPartialMember::from),
+            mention_everyone => msg.mention_everyone,
+            mention_roles => msg.mention_roles.clone().into_iter().map(|r| SmartHax(r)).collect::<Vec<_>>(),
+            mentions => msg.mentions.clone().into_iter().map(DbDiscordUser::from).collect::<Vec<_>>(),
+            nonce_debug => format!("{:?}",msg.nonce), //TODO: should probably file a bug and/or pull request with serenity about this one
+            pinned => msg.pinned,
+            timestamp => msg.timestamp,
+            tts => msg.tts,
+            webhook_id => SmartHax(msg.webhook_id),
+            archive_recvd_at => recvd_at,
         )?;
 
-        let message_rowid = tx.last_insert_rowid();
+        //let message_rowid:i64 = tx.query("SELECT currval(pg_get_serial_sequence('message','rowid'));",&[])?.get(0).unwrap().get(0);
+        let message_rowid = pg_sequence_currval(tx, "message", "rowid")?;
 
         //attachments
         for attachment in &msg.attachments {
-            insert_helper!(
+            pg_insert_helper!(
                 tx, "attachment",
-                "message_rowid" => message_rowid,
-                "discord_id" => attachment.id.parse::<i64>().expect("could not parse attachment discord id"), //Yes, attachment.id is a String when all the other .id's are a u64 wrapper
-                "filename" => attachment.filename.filter_null(),
-                "height" => attachment.height.map(|h| h as i64),
-                "width" => attachment.width.map(|w| w as i64),
-                "proxy_url" => attachment.proxy_url,
-                "size" => (attachment.size as i64),
-                "url" => attachment.url.filter_null(),
+                message_rowid => message_rowid,
+                discord_id => DbSnowflake::from(attachment.id.parse::<i64>().expect("could not parse attachment discord id")), //Yes, attachment.id is a String when all the other .id's are a u64 wrapper
+                filename => attachment.filename.filter_null(),
+                height => attachment.height.map(|h| h as i64),
+                width => attachment.width.map(|w| w as i64),
+                proxy_url => attachment.proxy_url.filter_null(),
+                size => (attachment.size as i64),
+                url => attachment.url.filter_null(),
             )?;
         }
 
         //embeds
         for embed in &msg.embeds {
-            insert_helper!(
+            pg_insert_helper!(
                 tx, "embed",
-                "message_rowid" => message_rowid,
-                "author_is_some" => embed.author.is_some(),
-                "author_icon_url" => embed.author.clone().map(|a| a.icon_url).filter_null(),
-                "author_name" => embed.author.clone().map(|a| a.name).filter_null(),
-                "author_proxy_icon_url" => embed.author.clone().map(|a| a.proxy_icon_url).filter_null(),
-                "author_url" => embed.author.clone().map(|a| a.url).filter_null(),
-                "colour_u32" => embed.colour.0,
-                "description" => embed.description.filter_null(),
-                "footer_is_some" => embed.footer.is_some(),
-                "footer_icon_url" => embed.footer.clone().map(|f| f.icon_url).filter_null(),
-                "footer_proxy_icon_url" => embed.footer.clone().map(|f| f.proxy_icon_url).filter_null(),
-                "footer_text" => embed.footer.clone().map(|f| f.text).filter_null(),
-                "image_is_some" => embed.image.is_some(),
-                "image_height" => embed.image.clone().map(|i| i.height as i64),
-                "image_width" => embed.image.clone().map(|i| i.width as i64),
-                "image_proxy_url" => embed.image.clone().map(|i| i.proxy_url).filter_null(),
-                "image_url" => embed.image.clone().map(|i| i.url).filter_null(),
-                "kind" => embed.kind,
-                "provider_is_some" => embed.provider.is_some(),
-                "provider_name" => embed.provider.clone().map(|p| p.name).filter_null(),
-                "provider_url" => embed.provider.clone().map(|p| p.url).filter_null(),
-                "thumbnail_is_some" => embed.thumbnail.is_some(),
-                "thumbnail_height" => embed.thumbnail.clone().map(|t| t.height as i64),
-                "thumbnail_width" => embed.thumbnail.clone().map(|t| t.width as i64),
-                "thumbnail_url" => embed.thumbnail.clone().map(|t| t.url).filter_null(),
-                "thumbnail_proxy_url" => embed.thumbnail.clone().map(|t| t.proxy_url).filter_null(),
-                "timestamp" => embed.timestamp,
-                "title" => embed.title.filter_null(),
-                "url" => embed.url.filter_null(),
-                "video_is_some" => embed.video.is_some(),
-                "video_height" => embed.video.clone().map(|v| v.height as i64),
-                "video_width" => embed.video.clone().map(|v| v.width as i64),
-                "video_url" => embed.video.clone().map(|v| v.url).filter_null(),
+                message_rowid => message_rowid,
+                author => embed.author.clone().map(DbEmbedAuthor::from),
+                colour_u32 => DbDiscordColour::from(embed.colour),
+                description => embed.description.filter_null(),
+                footer => embed.footer.clone().map(DbEmbedFooter::from),
+                image => embed.image.clone().map(DbEmbedImage::from),
+                kind => embed.kind.filter_null(),
+                provider => embed.provider.clone().map(DbEmbedProvider::from),
+                thumbnail => embed.thumbnail.clone().map(DbEmbedImage::from),
+                timestamp => embed.timestamp.filter_null(),
+                title => embed.title.filter_null(),
+                url => embed.url.filter_null(),
+                video => embed.video.clone().map(DbEmbedVideo::from),
             )?;
 
-            let embed_rowid = tx.last_insert_rowid();
+            //let embed_rowid = tx.last_insert_rowid();
+            let embed_rowid = pg_sequence_currval(tx, "embed", "rowid")?;
 
             //insert embed fields
             for embed_field in &embed.fields {
-                insert_helper!(
+                pg_insert_helper!(
                     tx, "embed_field",
-                    "embed_rowid" => embed_rowid,
-                    "inline" => embed_field.inline,
-                    "name"  => embed_field.name.filter_null(),
-                    "value" => embed_field.value.filter_null(),
+                    embed_rowid => embed_rowid,
+                    inline => embed_field.inline,
+                    name   => embed_field.name.filter_null(),
+                    value  => embed_field.value.filter_null(),
                 )?;
             }
-        }
-
-        //mentions
-        for user in &msg.mentions {
-            insert_helper!(
-                tx, "user_mention",
-                "message_rowid" => message_rowid,
-                "id" => SmartHax(user.id),
-                "avatar" => user.avatar.filter_null(),
-                "bot" => user.bot,
-                "discriminator" => user.discriminator,
-                "name" => user.name.filter_null(),
-            )?;
         }
 
         //reactions
@@ -585,27 +553,28 @@ impl Handler {
                     (false, None, None, None, Some(s)),
             };
             
-            insert_helper!(
+            pg_insert_helper!(
                 tx, "reaction",
-                "message_rowid" => message_rowid,
-                "count" => (reaction.count as i64),
-                "me" => reaction.me,
-                "reaction_is_custom" => is_custom,
+                message_rowid => message_rowid,
+                count => (reaction.count as i64),
+                me => reaction.me,
+                reaction_is_custom => is_custom,
                 
-                "reaction_animated" => animated,
-                "reaction_id" => SmartHax(id.map(|i| i.clone())),
-                "reaction_name" => name.filter_null(),
+                reaction_animated => animated,
+                reaction_id => SmartHax(id.clone()),
+                reaction_name => name.filter_null(),
                 
-                "reaction_string" => string.filter_null(),
+                reaction_string => string.filter_null(),
             )?;
         }
         
         Ok(())
     }
 
-    fn grab_channel_archive<'a>(conn: &mut sqlite::Connection, chan: &Channel, guild_name: String) -> Result<(), CetrizineError<'a>> {
+    //guild_name is used purely for the pretty output and debug messages
+    fn grab_channel_archive<C: pg::GenericConnection>(conn: &C, chan: &Channel, guild_name: String) -> Result<(), CetrizineError> {
         let name = get_name(chan);
-        println!("ARCHIVING CHAN {} (id {})", &name, &chan.id());
+        println!("ARCHIVING CHAN {}#{} (id {})", &guild_name, &name, &chan.id());
         let mut got_messages = false;
 
         let last_msg_id = match get_last_message_id(chan) {
@@ -614,7 +583,8 @@ impl Handler {
         };
 
         //println!("DEBUG: selecting maybe_res WHERE start >= {} >= end AND chan = {}",last_msg_id,chan.id());
-        let mut maybe_res:Option<(i64,u64,Option<u64>,bool)> = conn.query_row("
+        let rows = conn.query(
+            "
 SELECT
   rowid,
   end_message_id,
@@ -624,17 +594,24 @@ FROM message_archive_gets
 WHERE 
   (
     (
-      start_message_id >= ?1 AND ?1 >= end_message_id
+      start_message_id >= $1 AND $1 >= end_message_id
     ) OR 
-    around_message_id = ?1
+    around_message_id = $1
   ) 
   AND 
-  channel_id = ?2
+  channel_id = $2
 ORDER BY end_message_id ASC
 LIMIT 1;",
-            &[&SmartHax(last_msg_id) as &ToSql, &SmartHax(chan.id())],
-            |r| Ok((r.get(0)?,r.get::<_,i64>(1)? as u64,r.get::<_,Option<i64>>(2)?.map(|i| i as u64),r.get(3)?))
-        ).optional()?;
+            &[&(last_msg_id.get_snowflake_i64()) as &ToSql, &(chan.id().get_snowflake_i64())]
+        )?;
+        
+        let mut maybe_res:Option<(i64,u64,Option<u64>,bool)> =
+            if rows.len() == 0 {
+                None
+            } else if rows.len() == 1 {
+                let r = rows.get(0);
+                Some((r.get(0),r.get::<_,i64>(1) as u64,r.get::<_,Option<i64>>(2).map(|i| i as u64),r.get(3)))
+            } else { panic!() };
         //println!("maybe_res is {:?}",maybe_res);
         //std::process::exit(1);
         let mut get_before = DISCORD_MAX_SNOWFLAKE;
@@ -648,27 +625,39 @@ LIMIT 1;",
                 return Ok(());
             }
             //println!("DEBUG: selecting maybe_res again get_before {} before_message_id {:?} res.0 {}",get_before,before_message_id,res.0);
-            maybe_res = conn.query_row(
+            let rows = conn.query(
                 "SELECT rowid,end_message_id,after_message_id,(message_count_received < message_count_requested) FROM message_archive_gets WHERE (
-  ( start_message_id >= ?1 AND ?1 > end_message_id ) OR
-  before_message_id = ?1 OR
-  (?2 NOT NULL AND end_message_id = ?2)
-) AND channel_id = ?3 AND rowid != ?4
+  ( start_message_id >= $1 AND $1 > end_message_id ) OR
+  before_message_id = $1 OR
+  ($2::int8 IS NOT NULL AND end_message_id = $2::int8)
+) AND channel_id = $3 AND rowid != $4
 ORDER BY start_message_id ASC LIMIT 1;",
-                &[&(get_before as i64) as &ToSql,&(before_message_id.map(|u| u as i64)),&SmartHax(chan.id()),&res.0],
-                |r| Ok((r.get(0)?,r.get::<_,i64>(1)? as u64,r.get::<_,Option<i64>>(2)?.map(|i| i as u64),r.get(3)?))
-            ).optional()?;
+                &[&(get_before as i64) as &ToSql,&(before_message_id.map(|u| u as i64)),&(chan.id().get_snowflake_i64()),&res.0]
+            )?;
+            maybe_res =
+                if rows.len() == 0 {
+                    None
+                } else if rows.len() == 1 {
+                    let r = rows.get(0);
+                    Some((r.get(0),r.get::<_,i64>(1) as u64,r.get::<_,Option<i64>>(2).map(|i| i as u64),r.get(3)))
+                } else { panic!() };
             //println!("maybe_res again is {:?}",maybe_res);
         }
 
         //we're "in" a gap, lets find where this gap ends.
 
-        println!("DEBUG: selecting gap_end where end < {} and chan = {}",get_before,chan.id());
-        let gap_end = conn.query_row(
-            "SELECT start_message_id FROM message_archive_gets WHERE end_message_id < ?1 AND channel_id = ?2 ORDER BY start_message_id DESC LIMIT 1;",
-            &[&(get_before as i64) as &ToSql, &SmartHax(chan.id())],
-            |r| r.get(0)
-        ).optional()?.unwrap_or(0i64);
+        //println!("DEBUG: selecting gap_end where end < {} and chan = {}",get_before,chan.id());
+        let rows = conn.query(
+            "SELECT start_message_id FROM message_archive_gets WHERE end_message_id < $1 AND channel_id = $2 ORDER BY start_message_id DESC LIMIT 1;",
+            &[&(get_before as i64) as &ToSql, &(chan.id().get_snowflake_i64())],
+        )?;
+        let gap_end =
+            if rows.len() == 0 {
+                0i64
+            } else if rows.len() == 1 {
+                rows.get(0).get(0)
+            } else { panic!() };
+
         //println!("DEBUG: gap_end is {:?}",gap_end);
         let mut earliest_message_recvd = get_before;//DISCORD_MAX_SNOWFLAKE;
 
@@ -686,7 +675,7 @@ ORDER BY start_message_id ASC LIMIT 1;",
                 around = false;
                 msgs = chan.id().messages(|r| r.limit(asking_for.into()).before(earliest_message_recvd))?;
             }
-            let recvd_at = chrono::offset::Local::now();
+            let recvd_at = Utc::now();
             //messages seem to usually be ordered, largest ids first
             //however, that's documented literally nowhere, so lets sort them
             msgs.sort_unstable_by_key(|msg| {
@@ -704,26 +693,23 @@ ORDER BY start_message_id ASC LIMIT 1;",
 
             //DEBUG START
             /*let we_have_archived_this_before:bool = tx.query_row(
-                "SELECT COUNT(*) FROM message_archive_gets WHERE (start_message_id = ? AND end_message_id = ? AND rowid > 126941)",
+                "SELECT COUNT(*) FROM message_archive_gets WHERE (start_message_id = $1 AND end_message_id = $2 AND rowid > 126941)",
                 &[&SmartHax(first_msg.id) as &ToSql,&SmartHax(last_msg.id)],
                 |r| r.get(0)
             )?;*/
-            let already_archived_start:bool = tx.query_row(
-                "SELECT COUNT(*) FROM message_archive_gets WHERE (start_message_id >= ?1 AND ?1 >= end_message_id) AND channel_id = ?2 AND rowid > 193737",
-                &[&SmartHax(first_msg.id) as &ToSql,&SmartHax(chan.id())],
-                |r| r.get(0)
-            )?;
-            let already_archived_end:bool = tx.query_row(
-                "SELECT COUNT(*) FROM message_archive_gets WHERE (start_message_id >= ?1 AND ?1 >= end_message_id) AND channel_id = ?2 AND rowid > 193737",
-                &[&SmartHax(last_msg.id) as &ToSql,&SmartHax(chan.id())],
-                |r| r.get(0)
-            )?;
+            let already_archived_start:bool = tx.query(
+                "SELECT COUNT(*) FROM message_archive_gets WHERE (start_message_id >= $1 AND $1 >= end_message_id) AND channel_id = $2 AND rowid > 193737",
+                &[&(first_msg.id.get_snowflake_i64()) as &ToSql,&(chan.id().get_snowflake_i64())],
+            )?.get(0).get::<_,i64>(0) > 0;
+            let already_archived_end:bool = tx.query(
+                "SELECT COUNT(*) FROM message_archive_gets WHERE (start_message_id >= $1 AND $1 >= end_message_id) AND channel_id = $2 AND rowid > 193737",
+                &[&(last_msg.id.get_snowflake_i64()) as &ToSql,&(chan.id().get_snowflake_i64())],
+            )?.get(0).get::<_,i64>(0) > 0;
             let we_have_archived_this_before = already_archived_start && already_archived_end && (!around || {
-                tx.query_row(
-                    "SELECT COUNT(*) FROM message_archive_gets WHERE (start_message_id >= ?1 AND ?1 >= end_message_id) AND channel_id = ?2 AND rowid > 193737",
-                    &[&SmartHax(last_msg_id) as &ToSql,&SmartHax(chan.id())],
-                    |r| r.get(0)
-            )?
+                tx.query(
+                    "SELECT COUNT(*) FROM message_archive_gets WHERE (start_message_id >= $1 AND $1 >= end_message_id) AND channel_id = $2 AND rowid > 193737",
+                    &[&(last_msg_id.get_snowflake_i64()) as &ToSql,&(chan.id().get_snowflake_i64())],
+                )?.get(0).get::<_,i64>(0) > 0
             });
             if we_have_archived_this_before {
                 eprintln!(
@@ -736,19 +722,20 @@ ORDER BY start_message_id ASC LIMIT 1;",
                     guild_name,
                     name
                 );
+                std::process::exit(1);
             }
             //DEBUG END
             
             //TODO: put channel_rowid in there somwhere
-            insert_helper!(
+            pg_insert_helper!(
                 tx, "message_archive_gets",
-                "channel_id" => SmartHax(chan.id()),
-                "around_message_id" => if around { Some(SmartHax(last_msg_id)) } else { None },
-                "before_message_id" => if around { None } else { Some(earliest_message_recvd as i64) },
-                "start_message_id" => SmartHax(first_msg.id),
-                "end_message_id" => SmartHax(last_msg.id),
-                "message_count_requested" => asking_for,
-                "message_count_received" => (msgs.len() as i64),
+                channel_id => SmartHax(chan.id()),
+                around_message_id => if around { Some(SmartHax(last_msg_id)) } else { None },
+                before_message_id => if around { None } else { Some(DbSnowflake::from(earliest_message_recvd)) },
+                start_message_id => SmartHax(first_msg.id),
+                end_message_id => SmartHax(last_msg.id),
+                message_count_requested => asking_for as i64,
+                message_count_received => msgs.len() as i64,
             )?;
             tx.commit()?;
             got_messages = true;
@@ -771,44 +758,34 @@ ORDER BY start_message_id ASC LIMIT 1;",
     }
     
     /// This fn will block until it appears that all previous messages have been retrieved. This should probably be run in another thread.
-    fn grab_full_archive<'a>(_: Context, rdy: Ready) -> Result<(), CetrizineError<'a>> {
-        let func_start = chrono::offset::Local::now();
-        let mut conn = legacy::make_sqlite_connection()?;
+    fn grab_full_archive<C: pg::GenericConnection>(conn: &C, _: Context, rdy: Ready) -> Result<(), CetrizineError>{
+        let func_start = Utc::now();
+        //let mut conn = self.pool.clone().get()?;//legacy::make_sqlite_connection()?;
 
         let tx = conn.transaction()?;
-        insert_helper!(
+        
+        pg_insert_helper!(
             tx, "ready",
-            "session_id" => rdy.session_id,
-            "shard_0" => rdy.shard.clone().map(|a| a[0] as i64),
-            "shard_1" => rdy.shard.clone().map(|a| a[1] as i64),
-            "trace" => rdy.trace.join(",").filter_null(),
-            "user_id" => SmartHax(rdy.user.id),
-            "user_avatar" => rdy.user.avatar.filter_null(),
-            "user_bot" => rdy.user.bot,
-            "user_discriminator" => rdy.user.discriminator,
-            "user_email" => rdy.user.email.filter_null(),
-            "user_mfa_enabled" => rdy.user.mfa_enabled,
-            "user_name" => rdy.user.name.filter_null(),
-            "user_verified" => rdy.user.verified,
-            "version" => (rdy.version as i64),
+            session_id => rdy.session_id.filter_null(),
+            shard => rdy.shard.clone().map(|a| vec![a[0] as i64, a[1] as i64]),
+            trace => rdy.trace.into_iter().map(|s| s.filter_null()).collect::<Vec<_>>(),
+            user_info => DbCurrentUser::from(rdy.user.clone()),
+            version => (rdy.version as i64),
         )?;
 
-        let ready_rowid = tx.last_insert_rowid();
+        let ready_rowid = pg_sequence_currval(&tx, "ready", "rowid")?;
 
         //presences
         for (_,presence) in &rdy.presences {            
-            insert_helper!(
+            pg_insert_helper!(
                 tx, "user_presence",
-                "ready_rowid" => ready_rowid,
-                "guild_rowid" => (None as Option<i64>),
-                "game_is_some" => presence.game.is_some(),
-                "game_type" => presence.game.clone().map(|g| g.kind.into_str()),
-                "game_name" => presence.game.clone().map(|g| g.name).filter_null(),
-                "game_url" => presence.game.clone().map(|g| g.url).filter_null(),
-                "last_modified" => presence.last_modified.map(|v| v as i64),
-                "nick" => presence.nick.filter_null(),
-                "status" => presence.status.into_str(),
-                "user_id" => SmartHax(presence.user_id),
+                ready_rowid => ready_rowid,
+                guild_rowid => (None as Option<i64>),
+                game => presence.game.clone().map(DbUserPresenceGame::from),
+                last_modified => presence.last_modified.map(|v| v as i64),
+                nick => presence.nick.filter_null(),
+                status => presence.status.into_str(),
+                user_id => SmartHax(presence.user_id),
             )?;
         }
 
@@ -821,49 +798,31 @@ ORDER BY start_message_id ASC LIMIT 1;",
                 Guild(_) | Category(_) => panic!("Discord sent a Guild channel in the private channels list, id {}", id),
                 Group(group_lock) => {
                     let group = group_lock.read();
-                    insert_helper!(
+                    pg_insert_helper!(
                         tx, "group_channel",
-                        "discord_id" => SmartHax(group.channel_id),
-                        "ready_rowid" => ready_rowid,
-                        "icon" => group.icon.filter_null(),
-                        "last_message_id" => SmartHax(group.last_message_id),
-                        "last_pin_timestamp" => group.last_pin_timestamp,
-                        "name" => group.name.filter_null(),
-                        "owner_id" => SmartHax(group.owner_id),
+                        discord_id => SmartHax(group.channel_id),
+                        ready_rowid => ready_rowid,
+                        icon => group.icon.filter_null(),
+                        last_message_id => SmartHax(group.last_message_id),
+                        last_pin_timestamp => group.last_pin_timestamp,
+                        name => group.name.filter_null(),
+                        owner_id => SmartHax(group.owner_id),
+                        recipients => group.recipients.iter().map(|rl| DbDiscordUser::from(rl.1.read().clone())).collect::<Vec<_>>(),
                     )?;
-
-                    let group_rowid = tx.last_insert_rowid();
-
-                    for (_, user_lock) in &group.recipients {
-                        let user = user_lock.read();
-                        insert_helper!(
-                            tx, "group_user",
-                            "discord_id" => SmartHax(user.id),
-                            "group_channel_rowid" => group_rowid,
-                            "avatar" => user.avatar.filter_null(),
-                            "bot" => user.bot,
-                            "discriminator" => user.discriminator,
-                            "name" => user.name.filter_null(),
-                        )?;
-                    }
 
                     private_channels_to_archive.push(group.channel_id);
                 },
                 Private(chan_lock) => {
                     let chan = chan_lock.read();
                     let user = chan.recipient.read();
-                    insert_helper!(
+                    pg_insert_helper!(
                         tx, "private_channel",
-                        "discord_id" => SmartHax(chan.id),
-                        "ready_rowid" => ready_rowid,
-                        "last_message_id" => SmartHax(chan.last_message_id),
-                        "last_pin_timestamp" => chan.last_pin_timestamp,
-                        "kind" => chan.kind.into_str(),
-                        "recipient_id" => SmartHax(user.id),
-                        "recipient_avatar" => user.avatar.filter_null(),
-                        "recipient_bot" => user.bot,
-                        "recipient_discriminator" => user.discriminator,
-                        "recipient_name" => user.name.filter_null(),
+                        discord_id => SmartHax(chan.id),
+                        ready_rowid => ready_rowid,
+                        last_message_id => SmartHax(chan.last_message_id),
+                        last_pin_timestamp => chan.last_pin_timestamp,
+                        kind => chan.kind.into_str(),
+                        recipient => DbDiscordUser::from(user.clone()),
                     )?;
                     private_channels_to_archive.push(chan.id);
                 },
@@ -885,31 +844,31 @@ ORDER BY start_message_id ASC LIMIT 1;",
 
             let tx = conn.transaction()?;
 
-            insert_helper!(
+            pg_insert_helper!(
                 tx, "guild",
-                "ready_rowid" => ready_rowid, 
-                "discord_id" => SmartHax(guild.id), 
-                "afk_channel_id" => SmartHax(guild.afk_channel_id), 
-                "afk_timeout" => (guild.afk_timeout as i64), 
-                "application_id" => SmartHax(guild.application_id), 
-                "default_message_notification_level" => guild.default_message_notifications.into_str(),
-                "explicit_content_filter" => guild.explicit_content_filter.into_str(),
-                "features" => guild.features.join(",").filter_null(),
-                "icon" => guild.icon.filter_null(),
-                "joined_at" => guild.joined_at,
-                "large" => guild.large,
-                "member_count" => (guild.member_count as i64),
-                "mfa_level" => guild.mfa_level.into_str(),
-                "name" => guild.name.filter_null(),
-                "owner_id" => SmartHax(guild.owner_id),
-                "region" => guild.region.filter_null(),
-                "splash" => guild.splash.filter_null(),
-                "system_channel_id" => SmartHax(guild.system_channel_id),
-                "verification_level" => guild.verification_level.into_str(),
-                "archive_recvd_at" => func_start,
+                ready_rowid => ready_rowid, 
+                discord_id => SmartHax(guild.id), 
+                afk_channel_id => SmartHax(guild.afk_channel_id), 
+                afk_timeout => (guild.afk_timeout as i64), 
+                application_id => SmartHax(guild.application_id), 
+                default_message_notification_level => guild.default_message_notifications.into_str(),
+                explicit_content_filter => guild.explicit_content_filter.into_str(),
+                features => guild.features.clone().into_iter().map(|s| s.filter_null()).collect::<Vec<_>>(),
+                icon => guild.icon.filter_null(),
+                joined_at => guild.joined_at,
+                large => guild.large,
+                member_count => (guild.member_count as i64),
+                mfa_level => guild.mfa_level.into_str(),
+                name => guild.name.filter_null(),
+                owner_id => SmartHax(guild.owner_id),
+                region => guild.region.filter_null(),
+                splash => guild.splash.filter_null(),
+                system_channel_id => SmartHax(guild.system_channel_id),
+                verification_level => guild.verification_level.into_str(),
+                archive_recvd_at => func_start,
             )?;            
 
-            let guild_rowid = tx.last_insert_rowid();
+            let guild_rowid = pg_sequence_currval(&tx, "guild", "rowid")?;
 
             let mut guild_channels = Vec::<(ChannelId,i64)>::new();
 
@@ -917,24 +876,24 @@ ORDER BY start_message_id ASC LIMIT 1;",
             for (_id, chan_a_lock) in &guild.channels {
                 let chan = chan_a_lock.read();
 
-                insert_helper!(
+                pg_insert_helper!(
                     tx, "guild_channel",
-                    "discord_id" => SmartHax(chan.id),
-                    "guild_rowid" => guild_rowid,
-                    "guild_id" => SmartHax(chan.guild_id),
-                    "bitrate" => chan.bitrate.map(|b| b as i64),
-                    "category_id" => SmartHax(chan.category_id),
-                    "kind" => chan.kind.into_str(),
-                    "last_message_id" => SmartHax(chan.last_message_id),
-                    "last_pin_timestamp" => chan.last_pin_timestamp,
-                    "name" => chan.name.filter_null(),
-                    "position" => chan.position,
-                    "topic" => chan.topic.filter_null(),
-                    "user_limit" => chan.user_limit.map(|u| u as i64),
-                    "nsfw" => chan.nsfw,
+                    discord_id => SmartHax(chan.id),
+                    guild_rowid => guild_rowid,
+                    guild_id => SmartHax(chan.guild_id),
+                    bitrate => chan.bitrate.map(|b| b as i64),
+                    category_id => SmartHax(chan.category_id),
+                    kind => chan.kind.into_str(),
+                    last_message_id => SmartHax(chan.last_message_id),
+                    last_pin_timestamp => chan.last_pin_timestamp,
+                    name => chan.name.filter_null(),
+                    position => chan.position,
+                    topic => chan.topic.filter_null(),
+                    user_limit => chan.user_limit.map(|u| u as i64),
+                    nsfw => chan.nsfw,
                 )?;
 
-                let chan_rowid = tx.last_insert_rowid();
+                let chan_rowid = pg_sequence_currval(&tx, "guild_channel", "rowid")?;
 
                 guild_channels.push((chan.id.clone(), chan_rowid));
 
@@ -945,105 +904,94 @@ ORDER BY start_message_id ASC LIMIT 1;",
                         Role(rid) => ("Role", rid.0),
                     };
 
-                    insert_helper!(
+                    pg_insert_helper!(
                         tx, "permission_overwrite",
-                        "guild_channel_rowid" => chan_rowid,
-                        "allow_bits" => PermsToSql(overwrite.allow),
-                        "deny_bits" => PermsToSql(overwrite.deny),
-                        "permission_overwrite_type" => ov_type_str,
-                        "permission_overwrite_id" => (ov_id as i64),
+                        guild_channel_rowid => chan_rowid,
+                        allow_bits => PermsToSql(overwrite.allow),
+                        deny_bits => PermsToSql(overwrite.deny),
+                        permission_overwrite_type => ov_type_str,
+                        permission_overwrite_id => DbSnowflake::from(ov_id),
                     )?;
                 }
             }
 
             //emojis
             for (_, emoji) in &guild.emojis {
-                let id_arr_rowid = make_arr(&tx, &emoji.roles)?;
-
-                insert_helper!(
+                pg_insert_helper!(
                     tx, "emoji",
-                    "discord_id" => SmartHax(emoji.id),
-                    "guild_rowid" => guild_rowid,
-                    "animated" => emoji.animated,
-                    "name" => emoji.name.filter_null(),
-                    "managed" => emoji.managed,
-                    "require_colons" => emoji.require_colons,
-                    "roles" => id_arr_rowid,
+                    discord_id => SmartHax(emoji.id),
+                    guild_rowid => guild_rowid,
+                    animated => emoji.animated,
+                    name => emoji.name.filter_null(),
+                    managed => emoji.managed,
+                    require_colons => emoji.require_colons,
+                    roles => emoji.roles.clone().into_iter().map(DbSnowflake::from).collect::<Vec<_>>(),
                 )?;
             }
 
             //members
             for (_, member) in &guild.members {
-                let id_arr_rowid = make_arr(&tx, &member.roles)?;
-
                 let user = member.user.read();
 
-                insert_helper!(
+                pg_insert_helper!(
                     tx, "member",
-                    "guild_rowid" => guild_rowid,
-                    "deaf" => member.deaf,
-                    "guild_id" => SmartHax(member.guild_id),
-                    "joined_at" => member.joined_at,
-                    "mute" => member.mute,
-                    "nick" => member.nick.filter_null(),
-                    "roles" => id_arr_rowid,
-                    "user_id" => SmartHax(user.id),
-                    "user_avatar" => user.avatar.filter_null(),
-                    "user_is_bot" => user.bot,
-                    "user_discriminator" => user.discriminator,
-                    "user_name" => user.name.filter_null(),
+                    guild_rowid => guild_rowid,
+                    guild_id => SmartHax(member.guild_id),
+                    deaf => member.deaf,
+                    joined_at => member.joined_at,
+                    mute => member.mute,
+                    nick => member.nick.filter_null(),
+                    roles => member.roles.clone().into_iter().map(DbSnowflake::from).collect::<Vec<_>>(),
+                    user_info => DbDiscordUser::from(user.clone()),
                 )?;
 
             }
 
             //presences
             for (_, presence) in &guild.presences {
-                insert_helper!(
+                pg_insert_helper!(
                     tx, "user_presence",
-                    "ready_rowid" => (None as Option<i64>),
-                    "guild_rowid" => guild_rowid, //guild_rowid
-                    "game_is_some" => presence.game.is_some(), //game_is_some
-                    "game_type" => presence.game.clone().map(|g| g.kind.into_str()), //game_type
-                    "game_name" => presence.game.clone().map(|g| g.name).filter_null(), //game_name
-                    "game_url" => presence.game.clone().map(|g| g.url).filter_null(), //game_url
-                    "last_modified" => presence.last_modified.map(|v| v as i64),
-                    "nick" => presence.nick.filter_null(),
-                    "status" => presence.status.into_str(),
-                    "user_id" => SmartHax(presence.user_id),
+                    ready_rowid => (None as Option<i64>),
+                    guild_rowid => guild_rowid, //guild_rowid
+                    game => presence.game.clone().map(DbUserPresenceGame::from),
+                    last_modified => presence.last_modified.map(|v| v as i64),
+                    nick => presence.nick.filter_null(),
+                    status => presence.status.into_str(),
+                    user_id => SmartHax(presence.user_id),
                 )?;
             }
 
             //roles
             for (_, role) in &guild.roles {
 
-                insert_helper!(
+                pg_insert_helper!(
                     tx, "guild_role",
-                    "discord_id" => SmartHax(role.id), 
-                    "guild_rowid" => guild_rowid, 
-                    "colour_u32" => role.colour.0, 
-                    "hoist" => role.hoist,
-                    "managed" => role.managed,
-                    "mentionable" => role.mentionable,
-                    "name" => role.name.filter_null(),
-                    "permissions_bits" => PermsToSql(role.permissions),
-                    "position" => role.position,
+                    discord_id => SmartHax(role.id), 
+                    guild_rowid => guild_rowid, 
+                    colour_u32 => DbDiscordColour::from(role.colour),
+                    hoist => role.hoist,
+                    managed => role.managed,
+                    mentionable => role.mentionable,
+                    name => role.name.filter_null(),
+                    permissions_bits => PermsToSql(role.permissions),
+                    position => role.position,
                 )?;
             }
 
             //voice_states
             for (_, voice_state) in &guild.voice_states {
-                insert_helper!(
+                pg_insert_helper!(
                     tx, "voice_state",
-                    "guild_rowid" => guild_rowid,
-                    "channel_id" => SmartHax(voice_state.channel_id),
-                    "deaf" => voice_state.deaf,
-                    "mute" => voice_state.mute,
-                    "self_deaf" => voice_state.self_deaf,
-                    "self_mute" => voice_state.self_mute,
-                    "session_id" => voice_state.session_id,
-                    "suppress" => voice_state.suppress,
-                    "token" => voice_state.token.filter_null(),
-                    "user_id" => SmartHax(voice_state.user_id),
+                    guild_rowid => guild_rowid,
+                    channel_id => SmartHax(voice_state.channel_id),
+                    deaf => voice_state.deaf,
+                    mute => voice_state.mute,
+                    self_deaf => voice_state.self_deaf,
+                    self_mute => voice_state.self_mute,
+                    session_id => voice_state.session_id.filter_null(),
+                    suppress => voice_state.suppress,
+                    token => voice_state.token.filter_null(),
+                    user_id => SmartHax(voice_state.user_id),
                 )?;
             }
                                
@@ -1068,15 +1016,18 @@ ORDER BY start_message_id ASC LIMIT 1;",
                     continue;
                 }
                 Self::grab_channel_archive(
-                    &mut conn,
+                    &*conn,
                     &Channel::Guild(Arc::clone(&cell)),
                     guild.name.clone(),
                 )?;
             } // for (chan_id, chan) in guild.id.channels()? {
         } //for guild_status in &rdy.guilds {
+
+        //This is for debugging purposes, if a certain channel is causing problems it can be annoying when it changes ordering
         private_channels_to_archive.sort_unstable_by_key(|p| p.0);
+
         for chan_id in &private_channels_to_archive {
-            Self::grab_channel_archive(&mut conn, &chan_id.to_channel_cached().expect("channel absolutely should be cached"),String::from(""))?;
+            Self::grab_channel_archive(&*conn, &chan_id.to_channel_cached().expect("channel absolutely should be cached"),String::from(""))?;
         }
         
         println!("FINISHed archiving old messages");
@@ -1084,8 +1035,8 @@ ORDER BY start_message_id ASC LIMIT 1;",
     } //fn grab_archive ...
     
     fn message_result(&self, _: Context, msg: Message) -> Result<(), CetrizineError> {
-        let handler_start = chrono::prelude::Local::now();
-        let mut conn = self.conn.lock()?;
+        let handler_start = Utc::now();
+        let mut conn = self.pool.get()?;
         if let Some(guild_id) = msg.guild_id {
             if let Some(guild) = guild_id.to_guild_cached() {
                 println!("GNAME: {}", guild.read().name);
@@ -1112,19 +1063,19 @@ ORDER BY start_message_id ASC LIMIT 1;",
     }
 
     fn _channel_create(&self, _ctx: Context, channel_lock: Arc<RwLock<GuildChannel>>) -> Result<(), CetrizineError> {
-        let recvd_at = chrono::offset::Local::now();
-        let mut conn = self.conn.lock()?;
+        let recvd_at = Utc::now();
+        let mut conn = self.pool.get()?;
         let chan = channel_lock.read();
         println!("Chan create! {:?}", chan.name);
-        let tx = conn.transaction()?;
-        insert_helper!(
+        /*let tx = conn.transaction()?;
+        pg_insert_helper!(
             tx, "channel_create_event",
             "recvd_at" => recvd_at,
         )?;
 
         let cce_rowid = tx.last_insert_rowid();
 
-        insert_helper!(
+        pg_insert_helper!(
             tx, "guild_channel",
             "discord_id" => SmartHax(chan.id),
             "channel_create_event_rowid" => cce_rowid,
@@ -1151,7 +1102,7 @@ ORDER BY start_message_id ASC LIMIT 1;",
         let threads_chan = Channel::Guild(channel_lock);
         std::thread::spawn(move || {
             print_any_error!(Self::grab_channel_archive(&mut threads_conn, &threads_chan, guild_name));
-        });
+        });*/
         Ok(())
     }   
 }   
@@ -1160,11 +1111,11 @@ impl EventHandler for Handler {
     fn ready(&self, ctx: Context, ready: Ready) {
         //TODO: Discord can send multiple readys! What the fuck discord!?
         println!("READY RCVD");
-        let conn = self.conn.lock().unwrap();
-        let count_that_should_be_zero:i64 = conn.query_row(
-            "SELECT COUNT(*) FROM ready WHERE user_id != ?",
-            &[&SmartHax(ready.user.id) as &ToSql], |r| r.get(0)
-        ).unwrap();
+        let conn = self.pool.get().unwrap();
+        let count_that_should_be_zero:i64 = conn.query(
+            "SELECT COUNT(*) FROM ready WHERE ((user_info).inner_user).discord_id != $1;",
+            &[&i64::from(ready.user.id) as &ToSql],
+        ).unwrap().get(0).get(0);
 
         if count_that_should_be_zero != 0 {
             panic!("Error: you should always log in with the same user for the same database! Found ready with differing user id (current user is id {} aka {}#{})",ready.user.id.0,ready.user.name,ready.user.discriminator);
@@ -1179,13 +1130,16 @@ impl EventHandler for Handler {
                     return
                 },
             };
-            let res = Self::grab_full_archive(ctx, ready);
-            if let Err(CetrizineError::Serenity(serenity::Error::Http(serenity::prelude::HttpError::UnsuccessfulRequest(mut http_response)))) = res {
-                eprintln!("http response: {:?}", http_response);
-                let mut body = String::new();
-                std::io::Read::read_to_string(&mut http_response, &mut body).expect("could not read http body");
-                eprintln!("body: {:?}", body);
-            }else{ res.expect("unable to grab archive") }
+            let do_archiving = false || true;
+            if do_archiving {
+                let res = Self::grab_full_archive(&*conn, ctx, ready);
+                if let Err(CetrizineError{backtrace: _, error_type: CetrizineErrorType::Serenity(serenity::Error::Http(serenity::prelude::HttpError::UnsuccessfulRequest(mut http_response)))}) = res {
+                    eprintln!("http response: {:?}", http_response);
+                    let mut body = String::new();
+                    std::io::Read::read_to_string(&mut http_response, &mut body).expect("could not read http body");
+                    eprintln!("body: {:?}", body);
+                }else{ res.expect("unable to grab archive") }
+            }
         });
     }
 
@@ -1200,22 +1154,21 @@ impl EventHandler for Handler {
 }
 
 fn main() {
-    use argparse::{ArgumentParser, StoreTrue, Store, Print};
+    use argparse::{ArgumentParser, StoreTrue, StoreOption, Store, Print};
     let mut verbose = false;
     let mut do_migrate = false;
     let mut discord_token = String::from("");
+    let mut postgres_path_opt:Option<String> = None;
 
     {
         let mut ap = ArgumentParser::new();
         ap.set_description("A discord bot for recording/archiving");
-        /*ap.refer(&mut verbose)
-            .add_option(&["-v", "--verbose"], StoreTrue,
-                        "Show more information. Doesn't currently have any effect");*/
         ap.refer(&mut do_migrate)
             .add_option(&["--sqlite-migration"], StoreTrue,
                         "Perform a migration from a legacy SQLite database. Put the db file name in DATABASE_FILENAME");
         ap.refer(&mut discord_token)
             .envvar("DISCORD_TOKEN")
+            .required()
             .add_option(&["-t", "--token"], Store,
                         "Discord API token to use. Can also be provided in environment variable DISCORD_TOKEN");
         ap.add_option(
@@ -1223,11 +1176,18 @@ fn main() {
             Print(format!("{} {} {}",env!("CARGO_PKG_NAME"),env!("CARGO_PKG_VERSION"),env!("TARGET"))),
             "Show version"
         );
+        ap.refer(&mut postgres_path_opt)
+            //.envvar("PG_PATH")
+            .required()
+            .add_option(&["-p", "--postgres-path"], StoreOption,
+                        "postgres connection path, also PG_PATH");
         ap.parse_args_or_exit()
     }
 
+    let postgres_path = postgres_path_opt.unwrap();
+
     if do_migrate {
-        legacy::migrate_sqlite_to_postgres();
+        legacy::migrate_sqlite_to_postgres(&postgres_path);
         println!("FINISH");
         println!();
         println!();
@@ -1242,11 +1202,12 @@ fn main() {
         .or_else(|_| std::fs::read_to_string("../discord.token"))
         .expect("Expected a token in the environment")
         .to_owned();*/
-    
-    /*let handler = Handler{conn: Mutex::new(conn), currently_archiving: Arc::new(Mutex::new(()))};
-    let mut client = Client::new(&token, handler).expect("Err creating client");
+    let manager = r2d2_postgres::PostgresConnectionManager::new(postgres_path.as_str(), r2d2_postgres::TlsMode::None).unwrap();
+    let pool = r2d2::Pool::new(manager).unwrap();
+    let handler = Handler{pool, currently_archiving: Arc::new(Mutex::new(()))};
+    let mut client = Client::new(&discord_token, handler).expect("Err creating client");
 
     if let Err(why) = client.start() {
         eprintln!("Client error: {:?}", why);
-    }*/
+    }// */
 }
