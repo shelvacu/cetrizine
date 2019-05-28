@@ -131,7 +131,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 
 [[package]]
 name = "cetrizine"
-version = "1.0.0-wip"
+version = "1.0.1-wip"
 dependencies = [
  "argparse 0.2.2 (registry+https://github.com/rust-lang/crates.io-index)",
  "backtrace 0.3.24 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -141,7 +141,7 @@ dependencies = [
  "postgres-derive 0.3.3 (registry+https://github.com/rust-lang/crates.io-index)",
  "r2d2_postgres 0.14.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "rusqlite 0.18.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "serenity 0.5.13",
+ "serenity 0.5.14-shel1",
  "time 0.1.42 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 
@@ -1086,7 +1086,7 @@ dependencies = [
 
 [[package]]
 name = "serenity"
-version = "0.5.13"
+version = "0.5.14-shel1"
 dependencies = [
  "base64 0.10.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "bitflags 1.0.4 (registry+https://github.com/rust-lang/crates.io-index)",

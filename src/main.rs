@@ -1,6 +1,7 @@
 #![feature(type_alias_enum_variants)]
 #![feature(trace_macros)]
 #![feature(nll)]
+#![feature(const_slice_len)]
 #![deny(unused_must_use)]
 
 #![allow(unused_macros)] //todo
@@ -85,6 +86,7 @@ macro_rules! pg_insert_helper {
 
 mod legacy; //this *must* come after the pg_insert_helper macro
 mod db_types;
+mod migrations;
 
 use db_types::*;
 
@@ -93,6 +95,9 @@ const DISCORD_MAX_SNOWFLAKE:u64 = 9223372036854775807;
 struct Handler{
     pool: r2d2::Pool<r2d2_postgres::PostgresConnectionManager>,
     currently_archiving: Arc<Mutex<()>>,
+    beginning_of_time: std::time::Instant,
+    started_at: chrono::DateTime<chrono::Utc>,
+    session_id: i64,
 }
 
 pub trait EnumIntoString : Sized {
@@ -705,12 +710,12 @@ ORDER BY start_message_id ASC LIMIT 1;",
                 "SELECT COUNT(*) FROM message_archive_gets WHERE (start_message_id >= $1 AND $1 >= end_message_id) AND channel_id = $2 AND rowid > 193737",
                 &[&(last_msg.id.get_snowflake_i64()) as &ToSql,&(chan.id().get_snowflake_i64())],
             )?.get(0).get::<_,i64>(0) > 0;
-            let we_have_archived_this_before = already_archived_start && already_archived_end && (!around || {
+            let we_have_archived_this_before = already_archived_start && already_archived_end && (!around /*|| {
                 tx.query(
                     "SELECT COUNT(*) FROM message_archive_gets WHERE (start_message_id >= $1 AND $1 >= end_message_id) AND channel_id = $2 AND rowid > 193737",
                     &[&(last_msg_id.get_snowflake_i64()) as &ToSql,&(chan.id().get_snowflake_i64())],
                 )?.get(0).get::<_,i64>(0) > 0
-            });
+            }*/);
             if we_have_archived_this_before {
                 eprintln!(
                     "We've archived this before! chan id {} {} {} start {} end {} in {}#{}",
@@ -722,7 +727,7 @@ ORDER BY start_message_id ASC LIMIT 1;",
                     guild_name,
                     name
                 );
-                std::process::exit(1);
+                //std::process::exit(1);
             }
             //DEBUG END
             
@@ -840,7 +845,7 @@ ORDER BY start_message_id ASC LIMIT 1;",
                     continue;
                 }
             };
-            println!("ARCHIVING GUILD {:?}", &guild);
+            println!("ARCHIVING GUILD {}", &guild.name);
 
             let tx = conn.transaction()?;
 
@@ -1155,10 +1160,14 @@ impl EventHandler for Handler {
 
 fn main() {
     use argparse::{ArgumentParser, StoreTrue, StoreOption, Store, Print};
+    let beginning_of_time = std::time::Instant::now();
+    let started_at = chrono::Utc::now();
     let mut verbose = false;
     let mut do_migrate = false;
     let mut discord_token = String::from("");
     let mut postgres_path_opt:Option<String> = None;
+    let mut no_auto_migrate = false;
+    let mut migrate_only = false;
 
     {
         let mut ap = ArgumentParser::new();
@@ -1173,7 +1182,20 @@ fn main() {
                         "Discord API token to use. Can also be provided in environment variable DISCORD_TOKEN");
         ap.add_option(
             &["-V", "-v", "--version"],
-            Print(format!("{} {} {}",env!("CARGO_PKG_NAME"),env!("CARGO_PKG_VERSION"),env!("TARGET"))),
+            Print(format!(
+                "{} {}
+Target triple: {}
+Built at: {}
+Commit: {} committed on {}
+DB migration version: {}",
+                env!("CARGO_PKG_NAME"),
+                env!("CARGO_PKG_VERSION"),
+                env!("VERGEN_TARGET_TRIPLE"),
+                env!("VERGEN_BUILD_TIMESTAMP"),
+                env!("VERGEN_SHA"),
+                env!("VERGEN_COMMIT_DATE"),
+                migrations::CURRENT_MIGRATION_VERSION),
+            ),
             "Show version"
         );
         ap.refer(&mut postgres_path_opt)
@@ -1181,6 +1203,12 @@ fn main() {
             .required()
             .add_option(&["-p", "--postgres-path"], StoreOption,
                         "postgres connection path, also PG_PATH");
+        ap.refer(&mut no_auto_migrate)
+            .add_option(&["--no-auto-migrate"], StoreTrue,
+                        "Don't automatically perform database migrations");
+        ap.refer(&mut migrate_only)
+            .add_option(&["--migrate-only"], StoreTrue,
+                        "Perform any neccesary database migrations and exit");
         ap.parse_args_or_exit()
     }
 
@@ -1189,22 +1217,45 @@ fn main() {
     if do_migrate {
         legacy::migrate_sqlite_to_postgres(&postgres_path);
         println!("FINISH");
-        println!();
-        println!();
-        println!();
-        println!();
-        println!();
         std::process::exit(0);
     }
     
-    //panic!();
-    /*let token = env::var("DISCORD_TOKEN")
-        .or_else(|_| std::fs::read_to_string("../discord.token"))
-        .expect("Expected a token in the environment")
-        .to_owned();*/
     let manager = r2d2_postgres::PostgresConnectionManager::new(postgres_path.as_str(), r2d2_postgres::TlsMode::None).unwrap();
     let pool = r2d2::Pool::new(manager).unwrap();
-    let handler = Handler{pool, currently_archiving: Arc::new(Mutex::new(()))};
+
+    let session_id;
+    {
+        let setup_conn = pool.get().unwrap();
+        if migrate_only || !no_auto_migrate {
+            migrations::do_postgres_migrate(&*setup_conn);
+            if migrate_only { std::process::exit(0); }
+        } else {
+            if !migrations::migration_is_current(&*setup_conn) {
+                panic!("Migration version mismatch, no auto migrate, aborting");
+            }
+        }
+
+        pg_insert_helper!(
+            setup_conn, "run_session",
+            started_at => started_at,
+            pkg_name => env!("CARGO_PKG_NAME"),
+            version => env!("CARGO_PKG_VERSION"),
+            target => env!("VERGEN_TARGET_TRIPLE"),
+            build_timestamp => env!("VERGEN_BUILD_TIMESTAMP"),
+            git_sha_ref => env!("VERGEN_SHA"),
+            git_commit_date => env!("VERGEN_COMMIT_DATE"),
+        ).unwrap();
+
+        session_id = pg_sequence_currval(&*setup_conn, "run_session", "rowid").unwrap();
+    }
+    
+    let handler = Handler{
+        pool,
+        currently_archiving: Arc::new(Mutex::new(())),
+        beginning_of_time,
+        started_at,
+        session_id,
+    };
     let mut client = Client::new(&discord_token, handler).expect("Err creating client");
 
     if let Err(why) = client.start() {
