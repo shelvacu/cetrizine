@@ -49,13 +49,13 @@ impl log::Log for PostgresLogger {
                 the_conn, "log_entry",
                 logged_at_datetime => time,
                 logged_at_duration_secs => (duration.as_secs() as i64),
-                logged_at_duration_nanos => duration.subsec_nanos(),
+                logged_at_duration_nanos => (duration.subsec_nanos() as i32),
                 session_rowid => self.session_id,
                 log_level => record.level().into_str(),
                 target => record.target(),
                 module_path => record.module_path(),
                 file => record.file(),
-                line => record.line(),
+                line => record.line().map(|v|v as i64),
                 message_body => format!("{}",record.args()),
             )?;
             the_conn.batch_execute("SET synchronous_commit TO DEFAULT")?;

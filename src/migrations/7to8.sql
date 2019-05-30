@@ -19,9 +19,11 @@ CREATE TABLE raw_message (
   content_text            text,
   content_binary          bytea,
   CHECK(
-    (kind = 'Text' && content_text IS NOT NULL && content_binary IS NULL)
+    (kind = 'Text' AND content_text IS NOT NULL AND content_binary IS NULL)
     OR
-    (kind in ('Binary', 'Close', 'Ping', 'Pong') && content_text IS NULL && content_binary IS NULL)
+    (kind in ('Binary', 'Ping', 'Pong') AND content_text IS NULL AND content_binary IS NULL)
+    OR
+    (kind = 'Close' AND content_text IS NULL)
   ),
   UNIQUE(session_rowid, recvd_at_duration_secs, recvd_at_duration_nanos)
 );
@@ -38,5 +40,5 @@ CREATE TABLE log_entry (
   module_path             text,
   file                    text,
   line                    int8,
-  message_body            text not null,
+  message_body            text not null
 );

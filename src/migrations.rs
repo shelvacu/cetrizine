@@ -41,14 +41,15 @@ pub fn do_postgres_migrate<C: pg::GenericConnection>(conn: &C) {
         match MIGRATIONS[mv] {
             Invalid => panic!(),
             Normal(sql_str) => {
-                let tx = conn.transaction().unwrap();
                 info!("Running migration v{} => v{}", mv, mv+1);
+                let tx = conn.transaction().unwrap();
                 tx.batch_execute(sql_str).unwrap();
                 let updated = tx.execute("UPDATE migration_version SET version = $1 WHERE version = $2", &[&((mv+1) as i64), &(mv as i64)]).unwrap();
                 if updated != 1 {
                     panic!("Failed to set migration_version");
                 }
                 tx.commit().unwrap();
+                info!("Finished migration v{} => v{}", mv, mv+1);
             }
         }
     }       

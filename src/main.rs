@@ -86,7 +86,7 @@ struct Handler{
     pool: r2d2::Pool<r2d2_postgres::PostgresConnectionManager>,
     currently_archiving: Arc<Mutex<()>>,
     beginning_of_time: std::time::Instant,
-    started_at: chrono::DateTime<chrono::Utc>,
+    //started_at: chrono::DateTime<chrono::Utc>,
     session_id: i64,
 }
 
@@ -184,7 +184,7 @@ macro_rules! print_any_error {
     ( $e:expr ) => {{
         match $e {
             Ok(_) => (),
-            Err(e) => eprintln!("ERROR in {}:{} {:?}",file!(),line!(),e),
+            Err(e) => warn!("ERROR in {}:{} {:?}",file!(),line!(),e),
         }
     }};
 }
@@ -216,6 +216,56 @@ enum_stringify!{ serenity::model::channel::ChannelType => Text, Private, Voice, 
 enum_stringify!{ serenity::model::gateway::GameType => Playing, Streaming, Listening }
 enum_stringify!{ serenity::model::user::OnlineStatus => DoNotDisturb, Idle, Invisible, Offline, Online }
 enum_stringify!{ log::Level => Error, Warn, Info, Debug, Trace }
+
+impl EnumIntoString for serenity::OwnedMessage {
+    fn into_str(&self) -> &'static str {
+        use serenity::OwnedMessage::*;
+        match self {
+            Text(_) => "Text",
+            Binary(_) => "Binary",
+            Close(_) => "Close",
+            Ping(_) => "Ping",
+            Pong(_) => "Pong",
+        }
+    }
+    fn from_str<'a>(_input: &'a str) -> Option<Self> { None }
+}
+
+enum OwnedMessageData {
+    TextData(String),
+    BinaryData(Option<Vec<u8>>),
+}
+
+impl OwnedMessageData {
+    pub fn into_two(self) -> (Option<String>, Option<Vec<u8>>) {
+        use OwnedMessageData::*;
+        match self {
+            TextData(s) => (Some(s), None),
+            BinaryData(od) => (None, od),
+        }
+    }
+}
+
+trait OwnedMessageExt : Sized {
+    fn into_data(self) -> OwnedMessageData;
+    fn into_two_data(self) -> (Option<String>, Option<Vec<u8>>) {
+        self.into_data().into_two()
+    }
+}
+
+impl OwnedMessageExt for serenity::OwnedMessage {
+    fn into_data(self) -> OwnedMessageData {
+        use serenity::OwnedMessage::*;
+        use OwnedMessageData::*;
+        match self {
+            Text(s) => TextData(s),
+            Binary(d) => BinaryData(Some(d)),
+            Close(od) => BinaryData(od.map(|cd| cd.into_bytes().unwrap())),
+            Ping(d) => BinaryData(Some(d)),
+            Pong(d) => BinaryData(Some(d)),
+        }
+    }
+}
 
 fn get_name(chan:&Channel) -> String {
     use serenity::model::channel::Channel::*;
@@ -261,7 +311,6 @@ impl CetrizineError {
 
 #[derive(Debug)]
 pub enum CetrizineErrorType{
-    //Mutex(std::sync::PoisonError<std::sync::MutexGuard<'a,Connection>>),
     Pool(r2d2::Error),
     Sql(pg::Error),
     Serenity(serenity::Error),
@@ -415,20 +464,25 @@ impl FromSql for PermsToSql{
 }
 
 impl Handler {
+    fn archive_raw_event(&self, _ctx: Context, ev: RawEvent) -> Result<(), CetrizineError> {
+        let conn = self.pool.get()?;
+        let recvd_duration = ev.happened_at_instant - self.beginning_of_time;
+        let msg_type_str = ev.data.into_str();
+        let (msg_content_text, msg_content_binary) = ev.data.into_two_data();
+        pg_insert_helper!(
+            conn, "raw_message",
+            recvd_at_datetime => ev.happened_at_chrono,
+            recvd_at_duration_secs => (recvd_duration.as_secs() as i64),
+            recvd_at_duration_nanos => (recvd_duration.subsec_nanos() as i32),
+            session_rowid => self.session_id,
+            kind => msg_type_str,
+            content_text => msg_content_text,
+            content_binary => msg_content_binary,
+        )?;
+        Ok(())
+    }
+            
     fn archive_message(tx: &pg::transaction::Transaction, msg: &Message, recvd_at:DateTime<Utc>) -> Result<(), CetrizineError> {
-        //let memb = &msg.member;
-
-        //let member_roles_arr_id = memb.map(|m| make_arr(tx, &m.roles)?); <-- This doesn't work because the '?' is inside the closure and thus the closure's return type would be a Result<...> which would make member_roles_arr_id a Option<Result<...>> which is no bueno, so I did the below instead
-        /*let member_roles_arr_id = match memb {
-            Some(m) => Some(make_arr(tx, &m.roles)?),
-            None => None,
-        };
-        
-        let mention_roles_arr_id = make_arr(tx, &msg.mention_roles)?;*/
-
-        /*let mut filtered_content = msg.content.clone();
-        filtered_content.retain(|c| c != '\0');
-        let is_filtered = filtered_content != msg.content;*/
         pg_insert_helper!(
             tx, "message",
             discord_id => SmartHax(msg.id),
@@ -450,7 +504,6 @@ impl Handler {
             archive_recvd_at => recvd_at,
         )?;
 
-        //let message_rowid:i64 = tx.query("SELECT currval(pg_get_serial_sequence('message','rowid'));",&[])?.get(0).unwrap().get(0);
         let message_rowid = pg_sequence_currval(tx, "message", "rowid")?;
 
         //attachments
@@ -487,7 +540,6 @@ impl Handler {
                 video => embed.video.clone().map(DbEmbedVideo::from),
             )?;
 
-            //let embed_rowid = tx.last_insert_rowid();
             let embed_rowid = pg_sequence_currval(tx, "embed", "rowid")?;
 
             //insert embed fields
@@ -532,7 +584,7 @@ impl Handler {
     //guild_name is used purely for the pretty output and debug messages
     fn grab_channel_archive<C: pg::GenericConnection>(conn: &C, chan: &Channel, guild_name: String) -> Result<(), CetrizineError> {
         let name = get_name(chan);
-        println!("ARCHIVING CHAN {}#{} (id {})", &guild_name, &name, &chan.id());
+        info!("ARCHIVING CHAN {}#{} (id {})", &guild_name, &name, &chan.id());
         let mut got_messages = false;
 
         let last_msg_id = match get_last_message_id(chan) {
@@ -540,7 +592,7 @@ impl Handler {
             None => return Ok(()),
         };
 
-        //println!("DEBUG: selecting maybe_res WHERE start >= {} >= end AND chan = {}",last_msg_id,chan.id());
+        trace!("DEBUG: selecting maybe_res WHERE start >= {} >= end AND chan = {}",last_msg_id,chan.id());
         let rows = conn.query(
             "
 SELECT
@@ -560,7 +612,10 @@ WHERE
   channel_id = $2
 ORDER BY end_message_id ASC
 LIMIT 1;",
-            &[&(last_msg_id.get_snowflake_i64()) as &ToSql, &(chan.id().get_snowflake_i64())]
+            &[
+                &(last_msg_id.get_snowflake_i64()),
+                &(chan.id().get_snowflake_i64())
+            ]
         )?;
         
         let mut maybe_res:Option<(i64,u64,Option<u64>,bool)> =
@@ -570,19 +625,18 @@ LIMIT 1;",
                 let r = rows.get(0);
                 Some((r.get(0),r.get::<_,i64>(1) as u64,r.get::<_,Option<i64>>(2).map(|i| i as u64),r.get(3)))
             } else { panic!() };
-        //println!("maybe_res is {:?}",maybe_res);
-        //std::process::exit(1);
+        trace!("maybe_res is {:?}",maybe_res);
+
         let mut get_before = DISCORD_MAX_SNOWFLAKE;
-        //let before_id:u64 = last_msg_id.into();
-        let mut before_message_id:Option<u64>;// = Some(before_id.to_string());
+        let mut before_message_id:Option<u64>;
         
         while let Some(res) = maybe_res {
-            get_before = res.1;//.get::<_,String>(0).parse::<u64>().unwrap(); //49
-            before_message_id = res.2;//.get::<_,Option<String>>(1); //null
+            get_before = res.1;
+            before_message_id = res.2;
             if res.3 {
                 return Ok(());
             }
-            //println!("DEBUG: selecting maybe_res again get_before {} before_message_id {:?} res.0 {}",get_before,before_message_id,res.0);
+            trace!("selecting maybe_res again get_before {} before_message_id {:?} res.0 {}",get_before,before_message_id,res.0);
             let rows = conn.query(
                 "SELECT rowid,end_message_id,after_message_id,(message_count_received < message_count_requested) FROM message_archive_gets WHERE (
   ( start_message_id >= $1 AND $1 > end_message_id ) OR
@@ -590,7 +644,12 @@ LIMIT 1;",
   ($2::int8 IS NOT NULL AND end_message_id = $2::int8)
 ) AND channel_id = $3 AND rowid != $4
 ORDER BY start_message_id ASC LIMIT 1;",
-                &[&(get_before as i64) as &ToSql,&(before_message_id.map(|u| u as i64)),&(chan.id().get_snowflake_i64()),&res.0]
+                &[
+                    &(get_before as i64),
+                    &(before_message_id.map(|u| u as i64)),
+                    &(chan.id().get_snowflake_i64()),
+                    &res.0
+                ]
             )?;
             maybe_res =
                 if rows.len() == 0 {
@@ -598,26 +657,29 @@ ORDER BY start_message_id ASC LIMIT 1;",
                 } else if rows.len() == 1 {
                     let r = rows.get(0);
                     Some((r.get(0),r.get::<_,i64>(1) as u64,r.get::<_,Option<i64>>(2).map(|i| i as u64),r.get(3)))
-                } else { panic!() };
-            //println!("maybe_res again is {:?}",maybe_res);
+                } else { panic!("Query ending in LIMIT 1 did not return 0 or 1 rows.") };
+            trace!("maybe_res again is {:?}",maybe_res);
         }
 
-        //we're "in" a gap, lets find where this gap ends.
+        // We're "in" a gap, lets find where this gap ends.
 
-        //println!("DEBUG: selecting gap_end where end < {} and chan = {}",get_before,chan.id());
+        trace!("selecting gap_end where end < {} and chan = {}",get_before,chan.id());
         let rows = conn.query(
             "SELECT start_message_id FROM message_archive_gets WHERE end_message_id < $1 AND channel_id = $2 ORDER BY start_message_id DESC LIMIT 1;",
-            &[&(get_before as i64) as &ToSql, &(chan.id().get_snowflake_i64())],
+            &[
+                &(get_before as i64),
+                &(chan.id().get_snowflake_i64())
+            ],
         )?;
         let gap_end =
             if rows.len() == 0 {
                 0i64
             } else if rows.len() == 1 {
                 rows.get(0).get(0)
-            } else { panic!() };
+            } else { panic!("Query ending in LIMIT 1 did not return 0 or 1 rows.") };
 
-        //println!("DEBUG: gap_end is {:?}",gap_end);
-        let mut earliest_message_recvd = get_before;//DISCORD_MAX_SNOWFLAKE;
+        trace!("gap_end is {:?}",gap_end);
+        let mut earliest_message_recvd = get_before;
 
         while earliest_message_recvd > (gap_end as u64) {
             let asking_for = 100u8;
@@ -625,24 +687,27 @@ ORDER BY start_message_id ASC LIMIT 1;",
             let mut msgs;
             let around;
             if earliest_message_recvd == DISCORD_MAX_SNOWFLAKE {
-                //println!("asking for around {}", last_msg_id);
+                trace!("asking for around {}", last_msg_id);
                 around = true;
                 msgs = chan.id().messages(|r| r.limit(asking_for.into()).around(last_msg_id))?;
             }else{
-                //println!("asking for before {}",earliest_message_recvd);
+                trace!("asking for before {}",earliest_message_recvd);
                 around = false;
                 msgs = chan.id().messages(|r| r.limit(asking_for.into()).before(earliest_message_recvd))?;
             }
             let recvd_at = Utc::now();
-            //messages seem to usually be ordered, largest ids first
-            //however, that's documented literally nowhere, so lets sort them
+            
+            // Messages seem to usually be ordered, largest ids first,
+            // However, that's documented literally nowhere, so lets sort them.
             msgs.sort_unstable_by_key(|msg| {
                 let msg_id:u64 = msg.id.into();
                 std::u64::MAX - msg_id
             });
+            let msgs = msgs;
+            
             let tx = conn.transaction()?;
             for msg in &msgs {
-                //println!("Archiving Message id {:?}", msg.id);
+                trace!("Archiving Message id {:?}", msg.id);
                 Self::archive_message(&tx, msg, recvd_at)?;
             }
             if msgs.len() == 0 { break }
@@ -650,27 +715,30 @@ ORDER BY start_message_id ASC LIMIT 1;",
             let last_msg  = msgs.last().expect("im a bad");
 
             //DEBUG START
-            /*let we_have_archived_this_before:bool = tx.query_row(
-                "SELECT COUNT(*) FROM message_archive_gets WHERE (start_message_id = $1 AND end_message_id = $2 AND rowid > 126941)",
-                &[&SmartHax(first_msg.id) as &ToSql,&SmartHax(last_msg.id)],
-                |r| r.get(0)
-            )?;*/
             let already_archived_start:bool = tx.query(
                 "SELECT COUNT(*) FROM message_archive_gets WHERE (start_message_id >= $1 AND $1 >= end_message_id) AND channel_id = $2 AND rowid > 193737",
-                &[&(first_msg.id.get_snowflake_i64()) as &ToSql,&(chan.id().get_snowflake_i64())],
+                &[
+                    &(first_msg.id.get_snowflake_i64()),
+                    &(chan.id().get_snowflake_i64())
+                ],
             )?.get(0).get::<_,i64>(0) > 0;
             let already_archived_end:bool = tx.query(
                 "SELECT COUNT(*) FROM message_archive_gets WHERE (start_message_id >= $1 AND $1 >= end_message_id) AND channel_id = $2 AND rowid > 193737",
-                &[&(last_msg.id.get_snowflake_i64()) as &ToSql,&(chan.id().get_snowflake_i64())],
+                &[
+                    &(last_msg.id.get_snowflake_i64()),
+                    &(chan.id().get_snowflake_i64())
+                ],
             )?.get(0).get::<_,i64>(0) > 0;
-            let we_have_archived_this_before = already_archived_start && already_archived_end && (!around /*|| {
-                tx.query(
-                    "SELECT COUNT(*) FROM message_archive_gets WHERE (start_message_id >= $1 AND $1 >= end_message_id) AND channel_id = $2 AND rowid > 193737",
-                    &[&(last_msg_id.get_snowflake_i64()) as &ToSql,&(chan.id().get_snowflake_i64())],
-                )?.get(0).get::<_,i64>(0) > 0
-            }*/);
+            let already_archived_around:bool = tx.query(
+                "SELECT COUNT(*) FROM message_archive_gets WHERE (start_message_id >= $1 AND $1 >= end_message_id) AND channel_id = $2 AND rowid > 193737",
+                &[
+                    &(last_msg_id.get_snowflake_i64()),
+                    &(chan.id().get_snowflake_i64())
+                ],
+            )?.get(0).get::<_,i64>(0) > 0;
+            let we_have_archived_this_before = already_archived_start && already_archived_end && (!around || already_archived_around);
             if we_have_archived_this_before {
-                eprintln!(
+                error!(
                     "We've archived this before! chan id {} {} {} start {} end {} in {}#{}",
                     chan.id(),
                     if around {"around"} else {"before"},
@@ -697,7 +765,7 @@ ORDER BY start_message_id ASC LIMIT 1;",
             )?;
             tx.commit()?;
             got_messages = true;
-            println!(
+            info!(
                 "Archived {} message(s), {} thru {} in {}#{}",
                 msgs.len(),
                 first_msg.id,
@@ -706,16 +774,17 @@ ORDER BY start_message_id ASC LIMIT 1;",
                 name
             );
             earliest_message_recvd = last_msg.id.into();
-        } //while earliest_message_recvd > gap_end {
+        } //while earliest_message_recvd > gap_end
+        
         if got_messages {
-            //println!("recursing!");
+            trace!("recursing!");
             return Self::grab_channel_archive(conn, chan, guild_name);
         } else {
             Ok(())
         }
     }
     
-    /// This fn will block until it appears that all previous messages have been retrieved. This should probably be run in another thread.
+    /// This fn will block until it appears that all previous messages have been retrieved. Caller should probably be run in another thread.
     fn grab_full_archive<C: pg::GenericConnection>(conn: &C, _: Context, rdy: Ready) -> Result<(), CetrizineError>{
         let func_start = Utc::now();
 
@@ -793,11 +862,11 @@ ORDER BY start_message_id ASC LIMIT 1;",
             let guild = match guild_status {
                 serenity::model::guild::GuildStatus::OnlineGuild(g) => g,
                 _ => {
-                    println!("SKIPPING GUILD, dont have full info needed");
+                    info!("SKIPPING GUILD, dont have full info needed");
                     continue;
                 }
             };
-            println!("ARCHIVING GUILD {}", &guild.name);
+            info!("ARCHIVING GUILD {}", &guild.name);
 
             let tx = conn.transaction()?;
 
@@ -920,7 +989,6 @@ ORDER BY start_message_id ASC LIMIT 1;",
 
             //roles
             for (_, role) in &guild.roles {
-
                 pg_insert_helper!(
                     tx, "guild_role",
                     discord_id => SmartHax(role.id), 
@@ -952,9 +1020,8 @@ ORDER BY start_message_id ASC LIMIT 1;",
                 )?;
             }
                                
-
             tx.commit()?;
-            //for (chan_id, chan) in guild.id.channels()? {
+
             for (chan_id, _chan_rowid) in guild_channels {
                 let cell = &guild.channels[&chan_id];
                 let chan = cell.read();
@@ -969,7 +1036,7 @@ ORDER BY start_message_id ASC LIMIT 1;",
 
                 let perms = guild.permissions_in(chan_id, rdy.user.id);
                 if !perms.read_message_history() {
-                    println!("Skipping {}, cannot read message history", chan.name);
+                    info!("Skipping {}, cannot read message history", chan.name);
                     continue;
                 }
                 Self::grab_channel_archive(
@@ -977,45 +1044,50 @@ ORDER BY start_message_id ASC LIMIT 1;",
                     &Channel::Guild(Arc::clone(&cell)),
                     guild.name.clone(),
                 )?;
-            } // for (chan_id, chan) in guild.id.channels()? {
-        } //for guild_status in &rdy.guilds {
+            } //for (chan_id, chan) in guild.id.channels()?
+        } //for guild_status in &rdy.guilds
 
-        //This is for debugging purposes, if a certain channel is causing problems it can be annoying when it changes ordering
+        //This is for conssitency/debugging purposes, if a certain channel is causing problems it can be annoying when it changes ordering
         private_channels_to_archive.sort_unstable_by_key(|p| p.0);
 
         for chan_id in &private_channels_to_archive {
-            Self::grab_channel_archive(&*conn, &chan_id.to_channel_cached().expect("channel absolutely should be cached"),String::from(""))?;
+            Self::grab_channel_archive(
+                &*conn,
+                &chan_id.to_channel_cached().expect("channel absolutely should be cached"),
+                String::from("")
+            )?;
         }
         
-        println!("FINISHed archiving old messages");
+        info!("FINISHed archiving old messages");
         Ok(())
     } //fn grab_archive ...
     
     fn message_result(&self, _: Context, msg: Message) -> Result<(), CetrizineError> {
         let handler_start = Utc::now();
         let conn = self.pool.get()?;
+        let guild_str;
         if let Some(guild_id) = msg.guild_id {
             if let Some(guild) = guild_id.to_guild_cached() {
-                println!("GNAME: {}", guild.read().name);
+                guild_str = format!("GNAME: {}", guild.read().name);
             } else {
                 match guild_id.to_partial_guild() {
-                    Ok(part_guild) => println!("GNAME: {}", part_guild.name),
-                    Err(e) => println!("GNAME_ERR: {:?}", e)
+                    Ok(part_guild) => guild_str = format!("GNAME: {}", part_guild.name),
+                    Err(e) => guild_str = format!("GNAME_ERR: {:?}", e)
                 }
             }
         } else {
-            println!("NOGUILD");
+            guild_str = String::from("NOGUILD");
         }
-        println!("CHAN: {:?}", msg.channel_id.to_channel_cached().map(|c| get_name(&c)));
-        println!("DATE: {:?}", handler_start);
-        println!("USR: {:?}#{}", msg.author.name, msg.author.discriminator);
-        println!("MSG: {:?}", msg.content);
+        let chan_info = format!("CHAN: {:?}", msg.channel_id.to_channel_cached().map(|c| get_name(&c)));
+        let date_info = format!("DATE: {:?}", handler_start);
+        let user_info = format!("USER: {:?}#{}", msg.author.name, msg.author.discriminator);
+        let mesg_info = format!("MESG: {:?}", msg.content);
 
         let tx = conn.transaction()?;
         Self::archive_message(&tx, &msg, handler_start)?;
         tx.commit()?;
 
-        println!();
+        println!("{}\n{}\n{}\n{}\n{}\n", guild_str, chan_info, date_info, user_info, mesg_info);
         Ok(())
     }
 
@@ -1023,55 +1095,20 @@ ORDER BY start_message_id ASC LIMIT 1;",
         let _recvd_at = Utc::now();
         let _conn = self.pool.get()?;
         let chan = channel_lock.read();
-        println!("Chan create! {:?}", chan.name);
-        /*let tx = conn.transaction()?;
-        pg_insert_helper!(
-            tx, "channel_create_event",
-            "recvd_at" => recvd_at,
-        )?;
-
-        let cce_rowid = tx.last_insert_rowid();
-
-        pg_insert_helper!(
-            tx, "guild_channel",
-            "discord_id" => SmartHax(chan.id),
-            "channel_create_event_rowid" => cce_rowid,
-            "guild_id" => SmartHax(chan.guild_id),
-            "bitrate" => chan.bitrate.map(|b| b as i64),
-            "category_id" => SmartHax(chan.category_id),
-            "kind" => chan.kind.into_str(),
-            "last_message_id" => SmartHax(chan.last_message_id),
-            "last_pin_timestamp" => chan.last_pin_timestamp,
-            "name" => chan.name.filter_null(),
-            "position" => chan.position,
-            "topic" => chan.topic.filter_null(),
-            "user_limit" => chan.user_limit.map(|u| u as i64),
-            "nsfw" => chan.nsfw,
-        )?;
-        tx.commit()?;
-
-        let guild_name:String = match chan.guild_id.to_guild_cached() {
-            Some(guild_lock) => guild_lock.read().name.clone(),
-            None => "NOT IN CACHE".into(),
-        };
-        let mut threads_conn = legacy::make_sqlite_connection()?;
-        std::mem::drop(chan);
-        let threads_chan = Channel::Guild(channel_lock);
-        std::thread::spawn(move || {
-            print_any_error!(Self::grab_channel_archive(&mut threads_conn, &threads_chan, guild_name));
-        });*/
+        info!("Chan create! {:?}", chan.name);
         Ok(())
     }   
 }   
 
 impl EventHandler for Handler {
     fn ready(&self, ctx: Context, ready: Ready) {
-        //TODO: Discord can send multiple readys! What the fuck discord!?
-        println!("READY RCVD");
+        // Discord can send multiple readys! What the fuck discord!?
+        // This is accounted for with self.currently_archiving.
+        info!("Ready event received.");
         let conn = self.pool.get().unwrap();
         let count_that_should_be_zero:i64 = conn.query(
             "SELECT COUNT(*) FROM ready WHERE ((user_info).inner_user).discord_id != $1;",
-            &[&i64::from(ready.user.id) as &ToSql],
+            &[&i64::from(ready.user.id)],
         ).unwrap().get(0).get(0);
 
         if count_that_should_be_zero != 0 {
@@ -1083,19 +1120,23 @@ impl EventHandler for Handler {
             let _lock = match archiving_mutex.try_lock() {
                 Ok(v) => v,
                 Err(_) => {
-                    eprintln!("WARN: received ready when already started archiving, ignoring");
+                    warn!("Received ready when already started archiving, ignoring");
                     return
                 },
             };
             let do_archiving = false || true;
             if do_archiving {
                 let res = Self::grab_full_archive(&*conn, ctx, ready);
-                if let Err(CetrizineError{backtrace: _, error_type: CetrizineErrorType::Serenity(serenity::Error::Http(serenity::prelude::HttpError::UnsuccessfulRequest(mut http_response)))}) = res {
-                    eprintln!("http response: {:?}", http_response);
+                if let Err(CetrizineError{backtrace: bt, error_type: CetrizineErrorType::Serenity(serenity::Error::Http(serenity::prelude::HttpError::UnsuccessfulRequest(mut http_response)))}) = res {
+                    warn!(
+                        "HTTP error!\n\nHTTP response: {:?}\n\nBacktrace: {:?}",
+                        bt,
+                        http_response
+                    );
                     let mut body = String::new();
                     std::io::Read::read_to_string(&mut http_response, &mut body).expect("could not read http body");
-                    eprintln!("body: {:?}", body);
-                }else{ res.expect("unable to grab archive") }
+                    warn!("HTTP body: {:?}", body);
+                }else{ res.expect("Unable to grab archive") }
             }
         });
     }
@@ -1107,6 +1148,10 @@ impl EventHandler for Handler {
 
     fn channel_create(&self, ctx: Context, channel: Arc<RwLock<GuildChannel>>) {
         print_any_error!(self._channel_create(ctx, channel));
+    }
+
+    fn raw_websocket_packet(&self, ctx: Context, packet: RawEvent) {
+        print_any_error!(self.archive_raw_event(ctx, packet));
     }
 }
 
@@ -1155,7 +1200,7 @@ DB migration version: {}",
             //.envvar("PG_PATH")
             .required()
             .add_option(&["-p", "--postgres-path"], StoreOption,
-                        "postgres connection path, also PG_PATH");
+                        "postgres connection path");
         ap.refer(&mut no_auto_migrate)
             .add_option(&["--no-auto-migrate"], StoreTrue,
                         "Don't automatically perform database migrations");
@@ -1172,7 +1217,7 @@ DB migration version: {}",
 
     if do_migrate {
         legacy::migrate_sqlite_to_postgres(&postgres_path);
-        println!("FINISH");
+        info!("Finished legacy sqlite migration");
         std::process::exit(0);
     }
     
@@ -1218,7 +1263,14 @@ DB migration version: {}",
         .. Default::default()
     };
     let simple_logger = simplelog::SimpleLogger::new(simplelog::LevelFilter::Info, simple_logger_config);
-    let pg_logger = Box::new(postgres_logger::PostgresLogger::new(pool.clone(), log::Level::Info, session_id, beginning_of_time));
+    let pg_logger = Box::new(
+        postgres_logger::PostgresLogger::new(
+            pool.clone(),
+            log::Level::Info,
+            session_id,
+            beginning_of_time
+        )
+    );
     multi_log::MultiLogger::init(vec![simple_logger, pg_logger], simplelog::Level::Info).expect("Failed to intialize logging.");
     info!("Cetrizine logging initialized.");
     
@@ -1226,12 +1278,9 @@ DB migration version: {}",
         pool,
         currently_archiving: Arc::new(Mutex::new(())),
         beginning_of_time,
-        started_at,
+        //started_at,
         session_id,
     };
     let mut client = Client::new(&discord_token, handler).expect("Err creating client");
-
-    if let Err(why) = client.start() {
-        error!("Client error: {:?}", why);
-    }
+    client.start().expect("Error starting client");
 }
