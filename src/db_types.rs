@@ -1,4 +1,3 @@
-use crate::serenity::prelude::*;
 use crate::serenity::model::prelude::*;
 use crate::serenity::utils::Colour;
 use crate::FilterExt;

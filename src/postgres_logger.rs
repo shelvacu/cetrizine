@@ -1,4 +1,4 @@
-use log::{LogRecord, LogLevel, LogMetadata};
+use log::{Record, Level, Metadata};
 use chrono;
 use r2d2_postgres::r2d2;
 //use crate::chrono;
@@ -10,7 +10,7 @@ pub const INTERNAL_LOG_TARGET:&str = "postgres_logger_db";
 
 pub struct PostgresLogger{
     pool: r2d2::Pool<PostgresConnectionManager>,
-    level: LogLevel,
+    level: Level,
     session_id: i64,
     b_o_t: std::time::Instant,
 }
@@ -18,7 +18,7 @@ pub struct PostgresLogger{
 impl PostgresLogger {
     pub fn new(
         pool: r2d2::Pool<PostgresConnectionManager>,
-        level: LogLevel,
+        level: Level,
         session_id: i64,
         b_o_t: std::time::Instant
     ) -> Self {
@@ -27,11 +27,11 @@ impl PostgresLogger {
 }
 
 impl log::Log for PostgresLogger {
-    fn enabled(&self, metadata: &LogMetadata) -> bool {
+    fn enabled(&self, metadata: &Metadata) -> bool {
         metadata.level() <= self.level && metadata.target() != INTERNAL_LOG_TARGET
     }
 
-    fn log(&self, record: &LogRecord) {
+    fn log(&self, record: &Record) {
         if !self.enabled(record.metadata()) { return }
         let duration = self.b_o_t.elapsed();
         let time = chrono::Utc::now();
@@ -39,7 +39,7 @@ impl log::Log for PostgresLogger {
         match self.pool.get() {
             Ok(c) => the_conn = c,
             Err(why) => {
-                error!(target: INTERNAL_LOG_TARGET, "Could not allocate postgres connection");
+                error!(target: INTERNAL_LOG_TARGET, "Could not allocate postgres connection: {:?}", why);
                 return;
             },
         }
@@ -53,9 +53,9 @@ impl log::Log for PostgresLogger {
                 session_rowid => self.session_id,
                 log_level => record.level().into_str(),
                 target => record.target(),
-                module_path => record.location().module_path(),
-                file => record.location().file(),
-                line => record.location().line(),
+                module_path => record.module_path(),
+                file => record.file(),
+                line => record.line(),
                 message_body => format!("{}",record.args()),
             )?;
             the_conn.batch_execute("SET synchronous_commit TO DEFAULT")?;
@@ -66,4 +66,6 @@ impl log::Log for PostgresLogger {
             Err(why) => error!(target: INTERNAL_LOG_TARGET, "Failed to insert log entry: {:?}", why),
         }
     }
+
+    fn flush(&self) {}
 }

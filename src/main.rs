@@ -95,44 +95,7 @@ pub trait EnumIntoString : Sized {
     fn from_str<'a>(input: &'a str) -> Option<Self>;
 }
 
-const AUTO_RETRY_DELAYS:&[u64] = &[0,1,2,4,8,16,32,64,128,256,512,1024,2048,4096,8192,16384,32768,65536];
-
-#[derive(Debug)]
-struct NullEscape<T:Debug>(pub T);
-
-impl ToSql for NullEscape<String>{
-    fn to_sql(&self,
-              ty: &Type,
-              out: &mut Vec<u8>) -> Result<IsNull, Box<dyn Error + 'static + Sync + Send>> {
-        if self.0.chars().all(|c| c != '\0' && c != '$') {
-            self.0.to_sql(ty,out)
-        } else {
-            let mut res = String::with_capacity(self.0.len() + 4);
-            for c in self.0.chars() {
-                match c {
-                    _ if c == '\0' => {
-                        res.push('$');
-                        res.push('0');
-                    },
-                    _ if c == '$' => {
-                        res.push('$');
-                        res.push('$');
-                    },
-                    c => {
-                        res.push(c);
-                    },
-                }
-            }
-            res.to_sql(ty,out)
-        }
-    }
-
-    fn accepts(ty: &Type) -> bool {
-        <String as ToSql>::accepts(ty)
-    }
-
-    to_sql_checked!{}
-}
+//const AUTO_RETRY_DELAYS:&[u64] = &[0,1,2,4,8,16,32,64,128,256,512,1024,2048,4096,8192,16384,32768,65536];
 
 trait OptionExt {
     type Inner;
@@ -179,7 +142,6 @@ impl FilterExt for str {
             }
             res
         }
-        //NullEscape(self.into())
     }
 }
 
@@ -253,7 +215,7 @@ enum_stringify!{ serenity::model::guild::VerificationLevel => None, Low, Medium,
 enum_stringify!{ serenity::model::channel::ChannelType => Text, Private, Voice, Group, Category }
 enum_stringify!{ serenity::model::gateway::GameType => Playing, Streaming, Listening }
 enum_stringify!{ serenity::model::user::OnlineStatus => DoNotDisturb, Idle, Invisible, Offline, Online }
-enum_stringify!{ log::LogLevel => Error, Warn, Info, Debug, Trace }
+enum_stringify!{ log::Level => Error, Warn, Info, Debug, Trace }
 
 fn get_name(chan:&Channel) -> String {
     use serenity::model::channel::Channel::*;
@@ -1031,7 +993,7 @@ ORDER BY start_message_id ASC LIMIT 1;",
     
     fn message_result(&self, _: Context, msg: Message) -> Result<(), CetrizineError> {
         let handler_start = Utc::now();
-        let mut conn = self.pool.get()?;
+        let conn = self.pool.get()?;
         if let Some(guild_id) = msg.guild_id {
             if let Some(guild) = guild_id.to_guild_cached() {
                 println!("GNAME: {}", guild.read().name);
@@ -1058,8 +1020,8 @@ ORDER BY start_message_id ASC LIMIT 1;",
     }
 
     fn _channel_create(&self, _ctx: Context, channel_lock: Arc<RwLock<GuildChannel>>) -> Result<(), CetrizineError> {
-        let recvd_at = Utc::now();
-        let mut conn = self.pool.get()?;
+        let _recvd_at = Utc::now();
+        let _conn = self.pool.get()?;
         let chan = channel_lock.read();
         println!("Chan create! {:?}", chan.name);
         /*let tx = conn.transaction()?;
@@ -1152,7 +1114,7 @@ fn main() {
     use argparse::{ArgumentParser, StoreTrue, StoreOption, Store, Print};
     let beginning_of_time = std::time::Instant::now();
     let started_at = chrono::Utc::now();
-    let mut verbose = false;
+    //let mut verbose = false;
     let mut do_migrate = false;
     let mut discord_token = String::from("");
     let mut postgres_path_opt:Option<String> = None;
@@ -1256,8 +1218,8 @@ DB migration version: {}",
         .. Default::default()
     };
     let simple_logger = simplelog::SimpleLogger::new(simplelog::LevelFilter::Info, simple_logger_config);
-    let pg_logger = Box::new(postgres_logger::PostgresLogger::new(pool.clone(), log::LogLevel::Info, session_id, beginning_of_time));
-    multi_log::MultiLogger::init(vec![simple_logger, pg_logger], simplelog::Level::Info);
+    let pg_logger = Box::new(postgres_logger::PostgresLogger::new(pool.clone(), log::Level::Info, session_id, beginning_of_time));
+    multi_log::MultiLogger::init(vec![simple_logger, pg_logger], simplelog::Level::Info).expect("Failed to intialize logging.");
     info!("Cetrizine logging initialized.");
     
     let handler = Handler{

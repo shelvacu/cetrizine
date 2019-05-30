@@ -5,31 +5,6 @@ use super::sqlite::{NO_PARAMS, OptionalExtension};
 
 use super::pbr::ProgressBar;
 
-#[derive(Debug)]
-enum MTWeirdHack<T> {
-    Arr(Vec<MTWeirdHack<T>>),
-    Val(T)
-}
-
-impl<T> MTWeirdHack<T> {
-    //I could do this with borrows, but the way this is to be used it should only be used once.
-    pub fn append_to(self, result_vec: &mut Vec<T>) -> () {
-        match self {
-            MTWeirdHack::Arr(inner_vec) => {
-                for thing in inner_vec {
-                    thing.append_to(result_vec)
-                }
-            },
-            MTWeirdHack::Val(inner_item) => result_vec.push(inner_item),
-        }
-    }
-    pub fn flatten(self) -> Vec<T> {
-        let mut res:Vec<T> = Vec::new();
-        self.append_to(&mut res);
-        return res;
-    }
-}
-
 pub fn filter_string(v: Vec<u8>) -> String {
     let s:String = std::str::from_utf8(&v).unwrap().into();
     if s.chars().all(|c| c != '\0' && c != '$') {
@@ -54,16 +29,6 @@ pub fn filter_string(v: Vec<u8>) -> String {
         }
         res
     }
-}
-
-pub fn id_arr(conn:&sqlite::Connection, i:i64) -> Vec<i64> {
-    conn.prepare_cached("SELECT id FROM id WHERE id_arr_rowid = ?1").unwrap().query_map(
-        &[&i as &sqlite::ToSql],
-        |r| {
-            let i:i64 = r.get::<_,String>(0).unwrap().parse().unwrap();
-            Ok(i)
-        }
-    ).unwrap().map(Result::unwrap).collect()
 }
 
 pub fn snowflake_arr(conn:&sqlite::Connection, i:i64) -> Vec<Snowflake> {
@@ -121,18 +86,6 @@ impl<'a> From<String> for Snowflake {
         Snowflake(s.parse().unwrap())
     }
 }
-        
-pub fn str_sf(_:&sqlite::Connection, t:String) -> Snowflake {
-    t.parse::<i64>().unwrap().into()
-}
-
-pub fn optstr_sf(_:&sqlite::Connection, t:Option<String>) -> Option<Snowflake> {
-    t.map(|v| v.parse::<i64>().unwrap().into())
-}
-
-pub fn int_sf(__:&sqlite::Connection, i:i64) -> Snowflake {
-    i.into()
-}
 
 #[derive(Clone,Debug,ToSql,FromSql)]
 #[postgres(name = "__t_discord_user")]
@@ -184,7 +137,7 @@ macro_rules! mass_insert_helper {
         let mut pb = ProgressBar::new(count as u64);
 
         while let Some($rowname) = rows.next().unwrap() {
-            let bla_ = $each_row;
+            let _bla = $each_row;
             pb.inc();
         }
     };
@@ -200,7 +153,7 @@ pub fn migrate_sqlite_to_postgres(pg_path: &str) -> () {
     println!("running any remaining sqlite migrations");
     sqlite_migrate();
     println!("finished sqlite migrations, writing postgres schema");
-    let mut pg_conn = pg::Connection::connect(pg_path/*"postgres://shelvacu@%2Fvar%2Frun%2Fpostgresql:5434/detroit"*/, TlsMode::None).unwrap();
+    let pg_conn = pg::Connection::connect(pg_path/*"postgres://shelvacu@%2Fvar%2Frun%2Fpostgresql:5434/detroit"*/, TlsMode::None).unwrap();
 
     let mp_table_exist_sql = "SELECT EXISTS (SELECT 1 FROM pg_tables WHERE schemaname = 'public' AND tablename = 'sqlite_migration_progress')";
     let mp_table_exists:bool = pg_conn.query(mp_table_exist_sql, &[] as &[&pg::types::ToSql]).unwrap().get(0).get(0);
@@ -211,7 +164,7 @@ pub fn migrate_sqlite_to_postgres(pg_path: &str) -> () {
     
     //let mut pg_conn = pg::Connection::connect("postgres://shelvacu@localhost:5434/detroit", TlsMode::None).unwrap();
     //let sql_conn = 5;
-    let mut sql_conn = make_sqlite_connection().expect("could not establish database connection");
+    let sql_conn = make_sqlite_connection().expect("could not establish database connection");
 
     let sqlite_mentions_select_str = "SELECT id, avatar, bot, discriminator, name FROM user_mention WHERE message_rowid = ?";
     let mut sqlite_mentions_stmt = sql_conn.prepare_cached(&sqlite_mentions_select_str).unwrap();
@@ -222,7 +175,7 @@ pub fn migrate_sqlite_to_postgres(pg_path: &str) -> () {
     };
 
     if get_progress() == 0 {
-        let mut pg_trans = pg_conn.transaction().unwrap();
+        let pg_trans = pg_conn.transaction().unwrap();
         mass_insert_helper! {
             sql_conn, "message", row,
             {
@@ -315,13 +268,13 @@ pub fn migrate_sqlite_to_postgres(pg_path: &str) -> () {
 
     //I forgot to put in something for 1 and I'm too lazy to change the rest of them so yeah
     if get_progress() == 1 {
-        let mut pg_trans = pg_conn.transaction().unwrap();
+        let pg_trans = pg_conn.transaction().unwrap();
         increment_progress_to(&pg_trans, 2);
         pg_trans.commit().unwrap();
     }
 
     if get_progress() == 2 {
-        let mut pg_trans = pg_conn.transaction().unwrap();
+        let pg_trans = pg_conn.transaction().unwrap();
         mass_insert_helper!{
             sql_conn, "reaction", row,
             {
@@ -353,7 +306,7 @@ pub fn migrate_sqlite_to_postgres(pg_path: &str) -> () {
     }
 
     if get_progress() == 3 {
-        let mut pg_trans = pg_conn.transaction().unwrap();
+        let pg_trans = pg_conn.transaction().unwrap();
         mass_insert_helper!{
             sql_conn, "attachment", row,
             pg_insert_helper!(
@@ -437,7 +390,7 @@ pub fn migrate_sqlite_to_postgres(pg_path: &str) -> () {
     struct DiscordColour(pub i64);
 
     if get_progress() == 4{
-        let mut pg_trans = pg_conn.transaction().unwrap();
+        let pg_trans = pg_conn.transaction().unwrap();
         mass_insert_helper!{
             sql_conn, "embed", row,
             {
@@ -511,7 +464,7 @@ pub fn migrate_sqlite_to_postgres(pg_path: &str) -> () {
     }
 
     if get_progress() == 5 {
-        let mut pg_trans = pg_conn.transaction().unwrap();
+        let pg_trans = pg_conn.transaction().unwrap();
         mass_insert_helper!{
             sql_conn, "embed_field", row,
             pg_insert_helper!(
@@ -541,7 +494,7 @@ pub fn migrate_sqlite_to_postgres(pg_path: &str) -> () {
     struct CurrentUser(pub CurrentUserInner);
 
     if get_progress() == 6 {
-        let mut pg_trans = pg_conn.transaction().unwrap();
+        let pg_trans = pg_conn.transaction().unwrap();
         mass_insert_helper!{
             sql_conn, "ready", row,
             pg_insert_helper!(
@@ -571,7 +524,7 @@ pub fn migrate_sqlite_to_postgres(pg_path: &str) -> () {
     }
 
     if get_progress() == 7 {
-        let mut pg_trans = pg_conn.transaction().unwrap();
+        let pg_trans = pg_conn.transaction().unwrap();
         let mut sqlite_group_user_stmt = sql_conn.prepare("SELECT * FROM group_user WHERE group_channel_rowid = ?").unwrap();
         mass_insert_helper!{
             sql_conn, "group_channel", row,
@@ -608,7 +561,7 @@ pub fn migrate_sqlite_to_postgres(pg_path: &str) -> () {
     }
 
     if get_progress() == 8 {
-        let mut pg_trans = pg_conn.transaction().unwrap();
+        let pg_trans = pg_conn.transaction().unwrap();
         mass_insert_helper!{
             sql_conn, "private_channel", row,
             pg_insert_helper!(
@@ -634,7 +587,7 @@ pub fn migrate_sqlite_to_postgres(pg_path: &str) -> () {
     }
     
     if get_progress() == 9 {
-        let mut pg_trans = pg_conn.transaction().unwrap();
+        let pg_trans = pg_conn.transaction().unwrap();
         mass_insert_helper!{
             sql_conn, "guild", row,
             pg_insert_helper!(
@@ -668,7 +621,7 @@ pub fn migrate_sqlite_to_postgres(pg_path: &str) -> () {
     }
 
     if get_progress() == 10 {
-        let mut pg_trans = pg_conn.transaction().unwrap();
+        let pg_trans = pg_conn.transaction().unwrap();
         mass_insert_helper!{
             sql_conn, "guild_channel", row,
             pg_insert_helper!(
@@ -695,7 +648,7 @@ pub fn migrate_sqlite_to_postgres(pg_path: &str) -> () {
     }
         
     if get_progress() == 11 {
-        let mut pg_trans = pg_conn.transaction().unwrap();
+        let pg_trans = pg_conn.transaction().unwrap();
         mass_insert_helper!{
             sql_conn, "permission_overwrite", row,
             pg_insert_helper!(
@@ -714,7 +667,7 @@ pub fn migrate_sqlite_to_postgres(pg_path: &str) -> () {
     }
                 
     if get_progress() == 12 {
-        let mut pg_trans = pg_conn.transaction().unwrap();
+        let pg_trans = pg_conn.transaction().unwrap();
         mass_insert_helper!{
             sql_conn, "emoji", row,
             pg_insert_helper!(
@@ -735,7 +688,7 @@ pub fn migrate_sqlite_to_postgres(pg_path: &str) -> () {
     }
 
     if get_progress() == 13 {
-        let mut pg_trans = pg_conn.transaction().unwrap();
+        let pg_trans = pg_conn.transaction().unwrap();
         mass_insert_helper!{
             sql_conn, "member", row,
             pg_insert_helper!(
@@ -776,7 +729,7 @@ pub fn migrate_sqlite_to_postgres(pg_path: &str) -> () {
 
 
     if get_progress() == 14 {
-        let mut pg_trans = pg_conn.transaction().unwrap();
+        let pg_trans = pg_conn.transaction().unwrap();
         mass_insert_helper!{
             sql_conn, "user_presence", row,
             {
@@ -808,7 +761,7 @@ pub fn migrate_sqlite_to_postgres(pg_path: &str) -> () {
     
 
     if get_progress() == 15 {
-        let mut pg_trans = pg_conn.transaction().unwrap();
+        let pg_trans = pg_conn.transaction().unwrap();
         mass_insert_helper!{
             sql_conn, "guild_role", row,
             pg_insert_helper!(
@@ -832,7 +785,7 @@ pub fn migrate_sqlite_to_postgres(pg_path: &str) -> () {
 
 
     if get_progress() == 16 {
-        let mut pg_trans = pg_conn.transaction().unwrap();
+        let pg_trans = pg_conn.transaction().unwrap();
         mass_insert_helper!{
             sql_conn, "voice_state", row,
             pg_insert_helper!(
@@ -857,7 +810,7 @@ pub fn migrate_sqlite_to_postgres(pg_path: &str) -> () {
 
 
     if get_progress() == 17 {
-        let mut pg_trans = pg_conn.transaction().unwrap();
+        let pg_trans = pg_conn.transaction().unwrap();
         pg_insert_helper!(
             pg_trans, "migration_version",
             version => 7i64,
@@ -890,13 +843,13 @@ pub fn migrate_sqlite_to_postgres(pg_path: &str) -> () {
     }
 
     if get_progress() == 18 {
-        let mut pg_trans = pg_conn.transaction().unwrap();
+        let pg_trans = pg_conn.transaction().unwrap();
         increment_progress_to(&pg_trans, 19);
         pg_trans.commit().unwrap();
     }
 
     if get_progress() == 19 {
-        let mut pg_trans = pg_conn.transaction().unwrap();
+        let pg_trans = pg_conn.transaction().unwrap();
         let batch_str:String = vec![
             "message",
             "reaction",
@@ -923,7 +876,7 @@ SELECT setval(pg_get_serial_sequence('{0}','rowid'), rowid) FROM {0} ORDER BY ro
         pg_trans.commit().unwrap();
     }
 
-    let mut pg_trans = pg_conn.transaction().unwrap();
+    let pg_trans = pg_conn.transaction().unwrap();
     increment_progress_to(&pg_trans, 21);
     pg_trans.commit().unwrap();
     
