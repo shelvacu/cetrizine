@@ -4,13 +4,8 @@
 #![feature(const_slice_len)]
 #![deny(unused_must_use)]
 
-#![allow(unused_macros)] //todo
-#![allow(unreachable_code)]
-#![allow(unused_imports)]
-#![allow(unused_variables)]
-#![allow(unused_mut)]
-#![allow(dead_code)]
-
+#[macro_use]
+extern crate log;
 extern crate serenity;
 extern crate rusqlite as sqlite;
 extern crate r2d2_postgres;
@@ -22,32 +17,26 @@ extern crate chrono;
 extern crate time;
 extern crate pbr;
 extern crate backtrace;
+extern crate simplelog;
+extern crate multi_log;
 
 use backtrace::Backtrace;
 
 use r2d2_postgres::r2d2;
 
 use pg::types::{IsNull,Type,ToSql,FromSql};
-use pg::TlsMode;
 
 use chrono::prelude::{DateTime,Utc};
-
-/*use sqlite::types::{ToSql,ToSqlOutput,FromSql,FromSqlResult,ValueRef};
-use sqlite::{Connection, NO_PARAMS};
-use sqlite::OptionalExtension;*/
 
 use serenity::{
     model::{gateway::Ready, channel::Message, channel::Channel},
     model::prelude::*,
-    utils::Colour,
-    //model::id::*,
     prelude::*,
 };
 
 use std::sync::{Mutex,Arc};
 use std::fmt::Debug;
 use std::error::Error;
-use std::env;
 
 macro_rules! pg_insert_helper {
     ($db:ident, $table_name:expr, $( $column_name:ident => $column_value:expr , )+ ) => {{
@@ -87,6 +76,7 @@ macro_rules! pg_insert_helper {
 mod legacy; //this *must* come after the pg_insert_helper macro
 mod db_types;
 mod migrations;
+mod postgres_logger;
 
 use db_types::*;
 
@@ -263,6 +253,7 @@ enum_stringify!{ serenity::model::guild::VerificationLevel => None, Low, Medium,
 enum_stringify!{ serenity::model::channel::ChannelType => Text, Private, Voice, Group, Category }
 enum_stringify!{ serenity::model::gateway::GameType => Playing, Streaming, Listening }
 enum_stringify!{ serenity::model::user::OnlineStatus => DoNotDisturb, Idle, Invisible, Offline, Online }
+enum_stringify!{ log::LogLevel => Error, Warn, Info, Debug, Trace }
 
 fn get_name(chan:&Channel) -> String {
     use serenity::model::channel::Channel::*;
@@ -765,7 +756,6 @@ ORDER BY start_message_id ASC LIMIT 1;",
     /// This fn will block until it appears that all previous messages have been retrieved. This should probably be run in another thread.
     fn grab_full_archive<C: pg::GenericConnection>(conn: &C, _: Context, rdy: Ready) -> Result<(), CetrizineError>{
         let func_start = Utc::now();
-        //let mut conn = self.pool.clone().get()?;//legacy::make_sqlite_connection()?;
 
         let tx = conn.transaction()?;
         
@@ -1168,6 +1158,7 @@ fn main() {
     let mut postgres_path_opt:Option<String> = None;
     let mut no_auto_migrate = false;
     let mut migrate_only = false;
+    let mut init_db = false;
 
     {
         let mut ap = ArgumentParser::new();
@@ -1209,6 +1200,9 @@ DB migration version: {}",
         ap.refer(&mut migrate_only)
             .add_option(&["--migrate-only"], StoreTrue,
                         "Perform any neccesary database migrations and exit");
+        ap.refer(&mut init_db)
+            .add_option(&["--init-db"], StoreTrue,
+                        "Initializes the database schema. Note that the `CREATE DATABASE` command needs to be run separately. This will also run the program normally unless --migrate-only is specified.");
         ap.parse_args_or_exit()
     }
 
@@ -1226,12 +1220,17 @@ DB migration version: {}",
     let session_id;
     {
         let setup_conn = pool.get().unwrap();
-        if migrate_only || !no_auto_migrate {
+        if init_db {
+            let tx = setup_conn.transaction().unwrap();
+            tx.batch_execute(migrations::DB_INIT_SQL).unwrap();
+            tx.commit().unwrap();
+        }
+        if migrate_only || init_db || !no_auto_migrate {
             migrations::do_postgres_migrate(&*setup_conn);
             if migrate_only { std::process::exit(0); }
         } else {
             if !migrations::migration_is_current(&*setup_conn) {
-                panic!("Migration version mismatch, no auto migrate, aborting");
+                panic!("Migration version mismatch, no auto migrate, aborting.");
             }
         }
 
@@ -1248,6 +1247,18 @@ DB migration version: {}",
 
         session_id = pg_sequence_currval(&*setup_conn, "run_session", "rowid").unwrap();
     }
+
+    let simple_logger_config = simplelog::Config{
+        time: Some(simplelog::Level::Info),
+        level: Some(simplelog::Level::Info),
+        target: Some(simplelog::Level::Info),
+        location: Some(simplelog::Level::Info),
+        .. Default::default()
+    };
+    let simple_logger = simplelog::SimpleLogger::new(simplelog::LevelFilter::Info, simple_logger_config);
+    let pg_logger = Box::new(postgres_logger::PostgresLogger::new(pool.clone(), log::LogLevel::Info, session_id, beginning_of_time));
+    multi_log::MultiLogger::init(vec![simple_logger, pg_logger], simplelog::Level::Info);
+    info!("Cetrizine logging initialized.");
     
     let handler = Handler{
         pool,
@@ -1259,6 +1270,6 @@ DB migration version: {}",
     let mut client = Client::new(&discord_token, handler).expect("Err creating client");
 
     if let Err(why) = client.start() {
-        eprintln!("Client error: {:?}", why);
-    }// */
+        error!("Client error: {:?}", why);
+    }
 }
