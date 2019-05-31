@@ -6,6 +6,7 @@
 
 #[macro_use]
 extern crate log;
+#[macro_use]
 extern crate serenity;
 extern crate rusqlite as sqlite;
 extern crate r2d2_postgres;
@@ -32,6 +33,11 @@ use serenity::{
     model::{gateway::Ready, channel::Message, channel::Channel},
     model::prelude::*,
     prelude::*,
+    client::bridge::gateway::{
+        event::ShardStageUpdateEvent,
+        ShardId,
+    },
+    framework::standard::StandardFramework,
 };
 
 use std::sync::{Mutex,Arc};
@@ -41,7 +47,6 @@ use std::error::Error;
 macro_rules! pg_insert_helper {
     ($db:ident, $table_name:expr, $( $column_name:ident => $column_value:expr , )+ ) => {{
         let table_name = $table_name;
-        let debug:bool = false && table_name == "message";
         let values:&[&pg::types::ToSql] = &[
             $(
                 &$column_value as &pg::types::ToSql,
@@ -51,8 +56,6 @@ macro_rules! pg_insert_helper {
         let pg_column_names = &[
             $( stringify!($column_name), )+
         ];
-
-        //if debug { dbg!(pg_column_names); }
 
         let pg_parameters = (0..pg_column_names.len()).into_iter().map(|j| format!("${}",j+1)).collect::<Vec<String>>().join(","); //makes a string like "$1,$2,$3" if pg_column_names.len() == 3
 
@@ -81,6 +84,8 @@ mod postgres_logger;
 use db_types::*;
 
 const DISCORD_MAX_SNOWFLAKE:u64 = 9223372036854775807;
+
+static SESSION_ID:std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
 
 struct Handler{
     pool: r2d2::Pool<r2d2_postgres::PostgresConnectionManager>,
@@ -215,6 +220,7 @@ enum_stringify!{ serenity::model::guild::VerificationLevel => None, Low, Medium,
 enum_stringify!{ serenity::model::channel::ChannelType => Text, Private, Voice, Group, Category }
 enum_stringify!{ serenity::model::gateway::GameType => Playing, Streaming, Listening }
 enum_stringify!{ serenity::model::user::OnlineStatus => DoNotDisturb, Idle, Invisible, Offline, Online }
+enum_stringify!{ serenity::gateway::ConnectionStage => Connected, Connecting, Disconnected, Handshake, Identifying, Resuming }
 enum_stringify!{ log::Level => Error, Warn, Info, Debug, Trace }
 
 impl EnumIntoString for serenity::OwnedMessage {
@@ -398,6 +404,7 @@ snowflake_impl!{MessageId}
 snowflake_impl!{RoleId}
 snowflake_impl!{UserId}
 snowflake_impl!{WebhookId}
+snowflake_impl!{ShardId}
 
 #[derive(Debug)]
 pub struct SmartHax<T: Debug>(pub T);
@@ -1097,14 +1104,27 @@ ORDER BY start_message_id ASC LIMIT 1;",
         let chan = channel_lock.read();
         info!("Chan create! {:?}", chan.name);
         Ok(())
-    }   
+    }
+
+    fn record_shard_stage_update(&self, _ctx: Context, ssue: ShardStageUpdateEvent) -> Result<(), CetrizineError> {
+        let conn = self.pool.get()?;
+        let moment = DbMoment::now(self.session_id, self.beginning_of_time);
+        pg_insert_helper!(
+            conn, "shard_stage_update_event",
+            happened_at => moment,
+            new_stage => ssue.new.into_str(),
+            old_stage => ssue.old.into_str(),
+            shard_id => SmartHax(ssue.shard_id),
+        )?;
+        Ok(())
+    }       
 }   
 
 impl EventHandler for Handler {
     fn ready(&self, ctx: Context, ready: Ready) {
         // Discord can send multiple readys! What the fuck discord!?
         // This is accounted for with self.currently_archiving.
-        info!("Ready event received.");
+        info!("Ready event received. Connected as: {}", &ready.user.name);
         let conn = self.pool.get().unwrap();
         let count_that_should_be_zero:i64 = conn.query(
             "SELECT COUNT(*) FROM ready WHERE ((user_info).inner_user).discord_id != $1;",
@@ -1152,6 +1172,10 @@ impl EventHandler for Handler {
 
     fn raw_websocket_packet(&self, ctx: Context, packet: RawEvent) {
         print_any_error!(self.archive_raw_event(ctx, packet));
+    }
+
+    fn shard_stage_update(&self, ctx: Context, ssue: ShardStageUpdateEvent) {
+        print_any_error!(self.record_shard_stage_update(ctx, ssue));
     }
 }
 
@@ -1215,21 +1239,43 @@ DB migration version: {}",
 
     let postgres_path = postgres_path_opt.unwrap();
 
+    let manager = r2d2_postgres::PostgresConnectionManager::new(postgres_path.as_str(), r2d2_postgres::TlsMode::None).unwrap();
+    let pool = r2d2::Pool::new(manager).unwrap();
+
+    let simple_logger_config = simplelog::Config{
+        time: Some(simplelog::Level::Info),
+        level: Some(simplelog::Level::Info),
+        target: Some(simplelog::Level::Info),
+        location: Some(simplelog::Level::Info),
+        .. Default::default()
+    };
+    let simple_logger = simplelog::SimpleLogger::new(simplelog::LevelFilter::Info, simple_logger_config);
+    let pg_logger = Box::new(
+        postgres_logger::PostgresLogger::new(
+            pool.clone(),
+            log::Level::Info,
+            beginning_of_time
+        )
+    );
+    multi_log::MultiLogger::init(vec![simple_logger, pg_logger], simplelog::Level::Info).expect("Failed to intialize logging.");
+    info!("Cetrizine logging initialized.");
+    
     if do_migrate {
         legacy::migrate_sqlite_to_postgres(&postgres_path);
         info!("Finished legacy sqlite migration");
         std::process::exit(0);
     }
     
-    let manager = r2d2_postgres::PostgresConnectionManager::new(postgres_path.as_str(), r2d2_postgres::TlsMode::None).unwrap();
-    let pool = r2d2::Pool::new(manager).unwrap();
-
     let session_id;
     {
         let setup_conn = pool.get().unwrap();
         if init_db {
             let tx = setup_conn.transaction().unwrap();
             tx.batch_execute(migrations::DB_INIT_SQL).unwrap();
+            pg_insert_helper!(
+                tx, "migration_version",
+                version => 7i64,
+            ).unwrap();
             tx.commit().unwrap();
         }
         if migrate_only || init_db || !no_auto_migrate {
@@ -1255,25 +1301,8 @@ DB migration version: {}",
         session_id = pg_sequence_currval(&*setup_conn, "run_session", "rowid").unwrap();
     }
 
-    let simple_logger_config = simplelog::Config{
-        time: Some(simplelog::Level::Info),
-        level: Some(simplelog::Level::Info),
-        target: Some(simplelog::Level::Info),
-        location: Some(simplelog::Level::Info),
-        .. Default::default()
-    };
-    let simple_logger = simplelog::SimpleLogger::new(simplelog::LevelFilter::Info, simple_logger_config);
-    let pg_logger = Box::new(
-        postgres_logger::PostgresLogger::new(
-            pool.clone(),
-            log::Level::Info,
-            session_id,
-            beginning_of_time
-        )
-    );
-    multi_log::MultiLogger::init(vec![simple_logger, pg_logger], simplelog::Level::Info).expect("Failed to intialize logging.");
-    info!("Cetrizine logging initialized.");
-    
+    SESSION_ID.store(session_id, std::sync::atomic::Ordering::Relaxed);
+
     let handler = Handler{
         pool,
         currently_archiving: Arc::new(Mutex::new(())),
@@ -1282,5 +1311,20 @@ DB migration version: {}",
         session_id,
     };
     let mut client = Client::new(&discord_token, handler).expect("Err creating client");
+    if discord_token.starts_with("Bot ") {
+        info!("Detected bot token, running with commands enabled");
+        client.with_framework(
+            StandardFramework::new()
+                .configure(|c| c.prefix("~"))
+                .cmd("ping", ping)
+        );
+    }else{
+        info!("Found non-bot token, will not respond to commands");
+    }
+    
     client.start().expect("Error starting client");
 }
+
+command!(ping(_context, message) {
+    let _ = message.reply("Pong!");
+});

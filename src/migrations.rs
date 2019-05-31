@@ -16,6 +16,7 @@ const MIGRATIONS:&[MigrationSpec] = &[
     Invalid, //5
     Invalid, //6
     Normal(include_str!("migrations/7to8.sql")), //7
+    Normal(include_str!("migrations/8to9.sql")), //8
 ];
 
 pub const CURRENT_MIGRATION_VERSION:usize = MIGRATIONS.len();
@@ -44,7 +45,13 @@ pub fn do_postgres_migrate<C: pg::GenericConnection>(conn: &C) {
                 info!("Running migration v{} => v{}", mv, mv+1);
                 let tx = conn.transaction().unwrap();
                 tx.batch_execute(sql_str).unwrap();
-                let updated = tx.execute("UPDATE migration_version SET version = $1 WHERE version = $2", &[&((mv+1) as i64), &(mv as i64)]).unwrap();
+                let updated = tx.execute(
+                    "UPDATE migration_version SET version = $1 WHERE version = $2",
+                    &[
+                        &((mv+1) as i64),
+                        &(mv as i64)
+                    ]
+                ).unwrap();
                 if updated != 1 {
                     panic!("Failed to set migration_version");
                 }
