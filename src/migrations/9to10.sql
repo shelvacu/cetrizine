@@ -1,39 +1,26 @@
-CREATE INDEX message_discord_id ON message (discord_id);
-CREATE INDEX message_channel_id ON message (channel_id,timestamp);
-CREATE INDEX message_guild_id ON message (guild_id,timestamp);
---TODO: probably index mentions and mention_roles
+--A guild with no prefix set does not have a row in this table.
+CREATE TABLE guild_prefixes (
+  guild_id                snowflake not null primary key,
+  command_prefix          text not null
+);
 
-CREATE INDEX reaction_message_rowid ON reaction(message_rowid);
-CREATE INDEX reaction_reaction_id ON reaction(reaction_id);
-CREATE INDEX reaction_reaction_string ON reaction(reaction_string);
+CREATE TABLE guild_create_event (
+  rowid                   serial8 not null primary key,
+  is_new                  bool not null,
+  recvd_at_datetime       timestamptz not null,
+  recvd_at_duration_secs  int8 not null,
+  recvd_at_duration_nanos int4 not null,
+  session_rowid           int8 not null REFERENCES run_session(rowid),
+  FOREIGN KEY (session_rowid, recvd_at_duration_secs, recvd_at_duration_nanos) REFERENCES raw_message(session_rowid, recvd_at_duration_secs, recvd_at_duration_nanos),
+  CHECK(
+  (recvd_at_duration_secs IS NOT NULL AND recvd_at_duration_nanos IS NOT NULL AND session_rowid IS NOT NULL)
+  OR
+  (recvd_at_duration_secs IS NULL AND recvd_at_duration_nanos IS NULL AND session_rowid IS NULL)
+  )
+);
 
-CREATE INDEX attachment_message_rowid ON attachment(message_rowid);
-CREATE INDEX attachment_discord_id ON attachment(discord_id);
-
-CREATE INDEX embed_message_rowid ON embed(message_rowid);
-
-CREATE INDEX embed_field_embed_rowid ON embed_field(embed_rowid, name);
-
-CREATE INDEX group_channel_ready_rowid ON group_channel(ready_rowid);
-CREATE INDEX group_channel_discord_id_rowid ON group_channel(discord_id, rowid);
-CREATE INDEX group_channel_owner_id ON group_channel(owner_id);
-
-CREATE INDEX private_channel_ready_rowid ON private_channel(ready_rowid);
-CREATE INDEX private_channel_discord_id ON private_channel(discord_id,rowid);
-CREATE INDEX private_channel_recipient ON private_channel(recipient,rowid);
-
-CREATE INDEX guild_ready_rowid ON guild(ready_rowid);
-CREATE INDEX guild_discord_id ON guild(discord_id, rowid);
-CREATE INDEX guild_name ON guild(name, rowid);
-CREATE INDEX guild_owner_id ON guild(owner_id);
-
-CREATE INDEX guild_channel_guild_rowid_category_id_position ON guild_channel(guild_rowid,category_id,position);
-CREATE INDEX guild_channel_discord_id ON guild_channel(discord_id);
-CREATE INDEX guild_channel_guild_id_category_id_position ON guild_channel(guild_id, category_id, position);
-CREATE INDEX guild_channel_name ON guild_channel(name);
-
-CREATE INDEX emoji_guild_rowid ON emoji(guild_rowid);
-CREATE INDEX emoji_discord_id ON emoji(discord_id);
-CREATE INDEX emoji_name ON emoji(name);
-
-CREATE INDEX guild_role_guild_rowid_name ON guild_role(guild_rowid, name);
+ALTER TABLE guild ADD COLUMN guild_create_event_rowid int8 REFERENCES guild_create_event(rowid);
+ALTER TABLE guild ADD CONSTRAINT guild_has_exactly_one_parent CHECK(
+  (ready_rowid IS NULL)::int +
+  (guild_create_event_rowid IS NULL)::int = 1
+);

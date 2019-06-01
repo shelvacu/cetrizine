@@ -17,6 +17,8 @@ const MIGRATIONS:&[MigrationSpec] = &[
     Invalid, //6
     Normal(include_str!("migrations/7to8.sql")), //7
     Normal(include_str!("migrations/8to9.sql")), //8
+    Normal(include_str!("migrations/9to10.sql")), //9
+    Normal(include_str!("migrations/10to11.sql")), //10
 ];
 
 pub const CURRENT_MIGRATION_VERSION:usize = MIGRATIONS.len();

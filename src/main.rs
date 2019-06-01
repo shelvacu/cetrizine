@@ -2,30 +2,43 @@
 #![feature(trace_macros)]
 #![feature(nll)]
 #![feature(const_slice_len)]
+#![feature(option_flattening)]
 #![deny(unused_must_use)]
 
+//Crates for debugging/logging
 #[macro_use]
 extern crate log;
+extern crate backtrace;
+extern crate simplelog;
+extern crate multi_log;
+
+//Crates for sqlite -> postgres migration
+extern crate rusqlite as sqlite;
+extern crate pbr;
+
+//Main discord library
 #[macro_use]
 extern crate serenity;
-extern crate rusqlite as sqlite;
+
+//Database, database connection pooling
 extern crate r2d2_postgres;
 #[macro_use]
 extern crate postgres as pg;
 #[macro_use]
 extern crate postgres_derive;
+
+//Used by serenity for sharedata
+extern crate typemap;
+
+//Gotta keep time
 extern crate chrono;
 extern crate time;
-extern crate pbr;
-extern crate backtrace;
-extern crate simplelog;
-extern crate multi_log;
 
 use backtrace::Backtrace;
 
 use r2d2_postgres::r2d2;
 
-use pg::types::{IsNull,Type,ToSql,FromSql};
+//use pg::types::{IsNull,Type,ToSql,FromSql};
 
 use chrono::prelude::{DateTime,Utc};
 
@@ -35,14 +48,16 @@ use serenity::{
     prelude::*,
     client::bridge::gateway::{
         event::ShardStageUpdateEvent,
-        ShardId,
+        //ShardId,
     },
-    framework::standard::StandardFramework,
 };
 
-use std::sync::{Mutex,Arc};
-use std::fmt::Debug;
-use std::error::Error;
+use std::sync::{
+    Mutex,
+    Arc,
+    mpsc::{self, Sender},
+    atomic::{Ordering, AtomicI64, AtomicU64},
+};
 
 macro_rules! pg_insert_helper {
     ($db:ident, $table_name:expr, $( $column_name:ident => $column_value:expr , )+ ) => {{
@@ -65,9 +80,6 @@ macro_rules! pg_insert_helper {
             " (", &pg_column_names.join(","), ") ",
             "VALUES (", &pg_parameters, ") ",
         ].join("");
-
-        if debug { dbg!(sql); }
-        if debug { dbg!(values); }
         
         ( || -> pg::Result<()>{
             assert_eq!($db.prepare_cached(sql)?.execute(values)?,1);
@@ -76,31 +88,67 @@ macro_rules! pg_insert_helper {
     }};
 }
 
+macro_rules! log_any_error {
+    ( $e:expr ) => {{
+        match $e {
+            Ok(val) => Some(val),
+            Err(e) => {
+                warn!("ERROR in {}:{} \"{}\" {:?}",file!(),line!(),stringify!($e),e);
+                None
+            },
+        }
+    }};
+}
+
 mod legacy; //this *must* come after the pg_insert_helper macro
 mod db_types;
 mod migrations;
 mod postgres_logger;
+mod commands;
 
 use db_types::*;
 
 const DISCORD_MAX_SNOWFLAKE:u64 = 9223372036854775807;
 
-static SESSION_ID:std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+static SESSION_ID:AtomicI64 = AtomicI64::new(0);
+static USER_ID:AtomicU64 = AtomicU64::new(0);
+
+struct PoolArcKey;
+impl typemap::Key for PoolArcKey {
+    type Value = Arc<r2d2::Pool<r2d2_postgres::PostgresConnectionManager>>;
+}
+
+struct IsBotBoolKey;
+impl typemap::Key for IsBotBoolKey {
+    type Value = bool;
+}
+
+trait ContextExt {
+    fn get_pool_arc(&self) -> Arc<r2d2::Pool<r2d2_postgres::PostgresConnectionManager>>;
+    fn is_bot(&self) -> bool;
+}
+
+impl ContextExt for Context {
+    fn get_pool_arc(&self) -> Arc<r2d2::Pool<r2d2_postgres::PostgresConnectionManager>> {
+        Arc::clone(self.data.lock().get::<PoolArcKey>().unwrap())
+    }
+
+    fn is_bot(&self) -> bool {
+        *self.data.lock().get::<IsBotBoolKey>().unwrap()
+    }
+}    
 
 struct Handler{
-    pool: r2d2::Pool<r2d2_postgres::PostgresConnectionManager>,
-    currently_archiving: Arc<Mutex<()>>,
+    pool: Arc<r2d2::Pool<r2d2_postgres::PostgresConnectionManager>>,
     beginning_of_time: std::time::Instant,
-    //started_at: chrono::DateTime<chrono::Utc>,
     session_id: i64,
+    archival_queue: Mutex<Sender<(Channel, String)>>,
 }
 
 pub trait EnumIntoString : Sized {
     fn into_str(&self) -> &'static str;
     fn from_str<'a>(input: &'a str) -> Option<Self>;
 }
-
-//const AUTO_RETRY_DELAYS:&[u64] = &[0,1,2,4,8,16,32,64,128,256,512,1024,2048,4096,8192,16384,32768,65536];
 
 trait OptionExt {
     type Inner;
@@ -157,13 +205,6 @@ impl FilterExt for String {
     }
 }
 
-/*impl<T: FilterExt> FilterExt for Option<T> {
-    type Return = Option<NullEscape<String>>;
-    fn filter_null(&self) -> Self::Return {
-        self.map(|t| t.filter_null())
-    }
-}*/
-
 impl FilterExt for Option<&str> {
     type Return = Option<String>;
     fn filter_null(&self) -> Self::Return {
@@ -183,15 +224,6 @@ impl FilterExt for Option<Option<String>> {
     fn filter_null(&self) -> Self::Return {
         self.clone().collapse().filter_null()
     }
-}
-
-macro_rules! print_any_error {
-    ( $e:expr ) => {{
-        match $e {
-            Ok(_) => (),
-            Err(e) => warn!("ERROR in {}:{} {:?}",file!(),line!(),e),
-        }
-    }};
 }
 
 macro_rules! enum_stringify {
@@ -324,24 +356,12 @@ pub enum CetrizineErrorType{
 
 impl std::fmt::Display for CetrizineError {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        //TODO: Should maybe do this differently, probably delegate to sub-errors' fmt()?
         write!(f, "{:?}", self)
     }
 }
 
 impl std::error::Error for CetrizineError {
-    fn description(&self) -> &str {
-        use CetrizineErrorType::*;
-        //TODO: Include sub-errors' description? Does that happen already?
-        match self.error_type {
-            //Mutex(_)    => "Mutex poisoned",
-            Pool(_)     => "Pool Error",
-            Sql(_)      => "SQLite Error",
-            Serenity(_) => "Serenity Error",
-        }
-    }
-
-    fn cause(&self) -> Option<&std::error::Error> {
+    fn source(&self) -> Option<&(std::error::Error + 'static)> {
         use CetrizineErrorType::*;
         match &self.error_type {
             //Mutex(e)    => Some(e),
@@ -370,105 +390,6 @@ impl From<r2d2::Error> for CetrizineError {
     }
 }
 
-pub trait Snowflake {
-    fn get_snowflake(&self) -> u64;
-
-    fn get_snowflake_i64(&self) -> i64 {
-        self.get_snowflake() as i64
-    }
-}
-
-macro_rules! snowflake_impl {
-    ($klass:ty) => {
-        impl Snowflake for $klass {
-            fn get_snowflake(&self) -> u64 {
-                self.0
-            }
-        }
-
-        impl Snowflake for &$klass {
-            fn get_snowflake(&self) -> u64 {
-                self.0
-            }
-        }
-    };
-}
-
-snowflake_impl!{ApplicationId}
-snowflake_impl!{AuditLogEntryId}
-snowflake_impl!{ChannelId}
-snowflake_impl!{EmojiId}
-snowflake_impl!{GuildId}
-snowflake_impl!{IntegrationId}
-snowflake_impl!{MessageId}
-snowflake_impl!{RoleId}
-snowflake_impl!{UserId}
-snowflake_impl!{WebhookId}
-snowflake_impl!{ShardId}
-
-#[derive(Debug)]
-pub struct SmartHax<T: Debug>(pub T);
-
-impl<T: Snowflake + Debug> ToSql for SmartHax<T>{
-    fn to_sql(&self,
-              ty: &Type,
-              out: &mut Vec<u8>) -> Result<IsNull, Box<dyn Error + 'static + Sync + Send>> {
-        DbSnowflake::from(self.0.get_snowflake_i64()).to_sql(ty, out)
-    }
-
-    fn accepts(ty: &Type) -> bool {
-        <DbSnowflake as ToSql>::accepts(ty)
-    }
-
-    to_sql_checked!{}
-}
-
-impl<U: Snowflake + Debug> ToSql for SmartHax<Option<U>>{
-    fn to_sql(&self,
-              ty: &Type,
-              out: &mut Vec<u8>) -> Result<IsNull, Box<dyn Error + 'static + Sync + Send>> {
-        self.0.as_ref().map(|v| DbSnowflake::from(Snowflake::get_snowflake_i64(v))).to_sql(ty, out)
-    }
-
-    fn accepts(ty: &Type) -> bool {
-        <Option<DbSnowflake> as ToSql>::accepts(ty)
-    }
-
-    to_sql_checked!{}
-}
-
-#[derive(Debug)]
-pub struct PermsToSql(pub serenity::model::permissions::Permissions);
-
-impl ToSql for PermsToSql{
-    fn to_sql(&self,
-              ty: &Type,
-              out: &mut Vec<u8>) -> Result<IsNull, Box<dyn Error + 'static + Sync + Send>> {
-        let val_u:u64 = self.0.bits();
-        //TODO: Do I *really* need unsafe here? Is this platform-independent? (probably not) (also see below)
-        let val_i:i64 = unsafe { std::mem::transmute(val_u) };
-        val_i.to_sql(ty, out)
-    }
-
-    fn accepts(ty: &Type) -> bool {
-        <i64 as ToSql>::accepts(ty)
-    }
-
-    to_sql_checked!{}
-}
-
-impl FromSql for PermsToSql{
-    fn from_sql(ty: &Type,
-                raw: &[u8]) -> Result<Self, Box<dyn Error + 'static + Sync + Send>> {
-        let val_i = <i64 as FromSql>::from_sql(ty, raw)?;
-        let val_u:u64 = unsafe { std::mem::transmute(val_i) };
-        Ok(Self(serenity::model::permissions::Permissions::from_bits_truncate(val_u)))
-    }
-
-    fn accepts(ty: &pg::types::Type) -> bool {
-        <i64 as FromSql>::accepts(ty)
-    }
-}
 
 impl Handler {
     fn archive_raw_event(&self, _ctx: Context, ev: RawEvent) -> Result<(), CetrizineError> {
@@ -486,6 +407,82 @@ impl Handler {
             content_text => msg_content_text,
             content_binary => msg_content_binary,
         )?;
+        trace!(
+            "Inserted raw message {}, {}, {}, {}",
+            &ev.happened_at_chrono,
+            &(recvd_duration.as_secs() as i64),
+            &(recvd_duration.subsec_nanos() as i32),
+            &self.session_id,
+        );
+        Ok(())
+    }
+
+    fn guild_create_result(&self, ctx: Context, guild: Guild, is_new: bool) -> Result<(), CetrizineError> {
+        let channel_archiver_sender = self.archival_queue.lock().unwrap().clone();
+        let conn = self.pool.get()?;
+        let ev = ctx.raw_event.clone().unwrap();
+        let recvd_duration = ev.happened_at_instant - self.beginning_of_time;
+        trace!(
+            "About to insert guild create event {}, {}, {}, {}",
+            &ev.happened_at_chrono,
+            &(recvd_duration.as_secs() as i64),
+            &(recvd_duration.subsec_nanos() as i32),
+            &self.session_id,
+        );
+
+        pg_insert_helper!(
+            conn, "guild_create_event",
+            is_new => is_new,
+            recvd_at_datetime => ev.happened_at_chrono,
+            recvd_at_duration_secs => (recvd_duration.as_secs() as i64),
+            recvd_at_duration_nanos => (recvd_duration.subsec_nanos() as i32),
+            session_rowid => self.session_id,
+        )?;
+
+        let guild_create_event_rowid = pg_sequence_currval(&*conn, "guild_create_event", "rowid")?;
+        std::thread::spawn(move || {
+            log_any_error!(Self::archive_guild(
+                &*conn,
+                &ctx,
+                &guild,
+                GuildParentId::CreateEvent(guild_create_event_rowid),
+                &channel_archiver_sender,
+            ));
+        });
+        Ok(())
+    }
+
+    fn ready_result(&self, ctx: Context, ready: Ready) -> Result<(), CetrizineError> {
+        info!("Ready event received. Connected as: {}", &ready.user.name);
+        let conn = self.pool.get()?;
+        USER_ID.store(ready.user.id.0, Ordering::Relaxed);
+
+        let is_bot = ctx.is_bot();
+        if is_bot && !ready.user.bot {
+            // This is really bad, this means the bot will
+            // respond to commands when it's not supposed to.
+
+            error!("Thought we were a bot when we weren't! Bailing immediately!");
+            std::process::exit(1);
+        } else if !is_bot && ready.user.bot {
+            // I really want to use like "uber warn" or something
+            // It's not an error because we continue on just fine...
+            warn!("The given token appeared to be a user token but discord tells us a bot. Commands are currently disabled.");
+        }
+        
+        let count_that_should_be_zero:i64 = conn.query(
+            "SELECT COUNT(*) FROM ready WHERE ((user_info).inner_user).discord_id != $1;",
+            &[&i64::from(ready.user.id)],
+        )?.get(0).get(0);
+
+        if count_that_should_be_zero != 0 {
+            panic!("Error: you should always log in with the same user for the same database! Found ready with differing user id (current user is id {} aka {}#{})",ready.user.id.0,ready.user.name,ready.user.discriminator);
+        }
+
+        let channel_archiver_sender = self.archival_queue.lock().unwrap().clone();
+        std::thread::spawn(move || {
+            log_any_error!(Self::grab_full_archive(&*conn, ctx, ready, channel_archiver_sender));
+        });
         Ok(())
     }
             
@@ -790,13 +787,215 @@ ORDER BY start_message_id ASC LIMIT 1;",
             Ok(())
         }
     }
+
+    fn archive_guild<C: pg::GenericConnection>(
+        conn: &C,
+        ctx: &Context,
+        guild: &Guild,
+        parent_rowid: GuildParentId,
+        channel_archiver_sender: &Sender<(Channel, String)>
+    ) -> Result<(), CetrizineError> {
+        info!("ARCHIVING GUILD {}", &guild.name);
+        let raw_event = ctx.raw_event.as_ref().unwrap();
+        let tx = conn.transaction()?;
+
+        pg_insert_helper!(
+            tx, "guild",
+            ready_rowid => parent_rowid.as_ready(),
+            guild_create_event_rowid => parent_rowid.as_create_event(),
+            discord_id => SmartHax(guild.id), 
+            afk_channel_id => SmartHax(guild.afk_channel_id), 
+            afk_timeout => (guild.afk_timeout as i64), 
+            application_id => SmartHax(guild.application_id), 
+            default_message_notification_level => guild.default_message_notifications.into_str(),
+            explicit_content_filter => guild.explicit_content_filter.into_str(),
+            features => guild.features.clone().into_iter().map(|s| s.filter_null()).collect::<Vec<_>>(),
+            icon => guild.icon.filter_null(),
+            joined_at => guild.joined_at,
+            large => guild.large,
+            member_count => (guild.member_count as i64),
+            mfa_level => guild.mfa_level.into_str(),
+            name => guild.name.filter_null(),
+            owner_id => SmartHax(guild.owner_id),
+            region => guild.region.filter_null(),
+            splash => guild.splash.filter_null(),
+            system_channel_id => SmartHax(guild.system_channel_id),
+            verification_level => guild.verification_level.into_str(),
+            archive_recvd_at => raw_event.happened_at_chrono,
+        )?;            
+
+        let guild_rowid = pg_sequence_currval(&tx, "guild", "rowid")?;
+
+        let mut guild_channels = Vec::<(ChannelId,i64)>::new();
+
+        //channels
+        for (_id, chan_a_lock) in &guild.channels {
+            let chan = chan_a_lock.read();
+
+            pg_insert_helper!(
+                tx, "guild_channel",
+                discord_id => SmartHax(chan.id),
+                guild_rowid => guild_rowid,
+                guild_id => SmartHax(chan.guild_id),
+                bitrate => chan.bitrate.map(|b| b as i64),
+                category_id => SmartHax(chan.category_id),
+                kind => chan.kind.into_str(),
+                last_message_id => SmartHax(chan.last_message_id),
+                last_pin_timestamp => chan.last_pin_timestamp,
+                name => chan.name.filter_null(),
+                position => chan.position,
+                topic => chan.topic.filter_null(),
+                user_limit => chan.user_limit.map(|u| u as i64),
+                nsfw => chan.nsfw,
+            )?;
+
+            let chan_rowid = pg_sequence_currval(&tx, "guild_channel", "rowid")?;
+
+            guild_channels.push((chan.id.clone(), chan_rowid));
+
+            for overwrite in &chan.permission_overwrites {
+                use serenity::model::channel::PermissionOverwriteType::*;
+                let (ov_type_str, ov_id) = match overwrite.kind {
+                    Member(uid) => ("Member", uid.0),
+                    Role(rid) => ("Role", rid.0),
+                };
+
+                pg_insert_helper!(
+                    tx, "permission_overwrite",
+                    guild_channel_rowid => chan_rowid,
+                    allow_bits => PermsToSql(overwrite.allow),
+                    deny_bits => PermsToSql(overwrite.deny),
+                    permission_overwrite_type => ov_type_str,
+                    permission_overwrite_id => DbSnowflake::from(ov_id),
+                )?;
+            }
+        }
+
+        //emojis
+        for (_, emoji) in &guild.emojis {
+            pg_insert_helper!(
+                tx, "emoji",
+                discord_id => SmartHax(emoji.id),
+                guild_rowid => guild_rowid,
+                animated => emoji.animated,
+                name => emoji.name.filter_null(),
+                managed => emoji.managed,
+                require_colons => emoji.require_colons,
+                roles => emoji.roles.clone().into_iter().map(DbSnowflake::from).collect::<Vec<_>>(),
+            )?;
+        }
+
+        //members
+        for (_, member) in &guild.members {
+            let user = member.user.read();
+
+            pg_insert_helper!(
+                tx, "member",
+                guild_rowid => guild_rowid,
+                guild_id => SmartHax(member.guild_id),
+                deaf => member.deaf,
+                joined_at => member.joined_at,
+                mute => member.mute,
+                nick => member.nick.filter_null(),
+                roles => member.roles.clone().into_iter().map(DbSnowflake::from).collect::<Vec<_>>(),
+                user_info => DbDiscordUser::from(user.clone()),
+            )?;
+
+        }
+
+        //presences
+        for (_, presence) in &guild.presences {
+            pg_insert_helper!(
+                tx, "user_presence",
+                ready_rowid => (None as Option<i64>),
+                guild_rowid => guild_rowid, //guild_rowid
+                game => presence.game.clone().map(DbUserPresenceGame::from),
+                last_modified => presence.last_modified.map(|v| v as i64),
+                nick => presence.nick.filter_null(),
+                status => presence.status.into_str(),
+                user_id => SmartHax(presence.user_id),
+            )?;
+        }
+
+        //roles
+        for (_, role) in &guild.roles {
+            pg_insert_helper!(
+                tx, "guild_role",
+                discord_id => SmartHax(role.id), 
+                guild_rowid => guild_rowid, 
+                colour_u32 => DbDiscordColour::from(role.colour),
+                hoist => role.hoist,
+                managed => role.managed,
+                mentionable => role.mentionable,
+                name => role.name.filter_null(),
+                permissions_bits => PermsToSql(role.permissions),
+                position => role.position,
+            )?;
+        }
+
+        //voice_states
+        for (_, voice_state) in &guild.voice_states {
+            pg_insert_helper!(
+                tx, "voice_state",
+                guild_rowid => guild_rowid,
+                channel_id => SmartHax(voice_state.channel_id),
+                deaf => voice_state.deaf,
+                mute => voice_state.mute,
+                self_deaf => voice_state.self_deaf,
+                self_mute => voice_state.self_mute,
+                session_id => voice_state.session_id.filter_null(),
+                suppress => voice_state.suppress,
+                token => voice_state.token.filter_null(),
+                user_id => SmartHax(voice_state.user_id),
+            )?;
+        }
+        
+        tx.commit()?;
+
+        for (chan_id, _chan_rowid) in guild_channels {
+            let cell = &guild.channels[&chan_id];
+            let chan = cell.read();
+            use serenity::model::channel::ChannelType::*;
+            match chan.kind {
+                Text => (),
+                Private => (),
+                Voice => continue,
+                Group => (),
+                Category => continue,
+            }
+
+            let uid = USER_ID.load(Ordering::Relaxed);
+            if uid == 0 {
+                warn!("USER_ID was read as 0.");
+            }
+
+            let perms = guild.permissions_in(chan_id, UserId(uid));
+            if !perms.read_message_history() {
+                info!("Skipping {}, cannot read message history", chan.name);
+                continue;
+            }
+            channel_archiver_sender.send((
+                Channel::Guild(Arc::clone(&cell)),
+                guild.name.clone(),
+            )).unwrap();
+            /*Self::grab_channel_archive(
+            &*conn,
+            &Channel::Guild(Arc::clone(&cell)),
+            guild.name.clone(),
+        )?;*/
+        } //for (chan_id, chan) in guild.id.channels()?
+        Ok(())
+    }
     
     /// This fn will block until it appears that all previous messages have been retrieved. Caller should probably be run in another thread.
-    fn grab_full_archive<C: pg::GenericConnection>(conn: &C, _: Context, rdy: Ready) -> Result<(), CetrizineError>{
-        let func_start = Utc::now();
-
+    fn grab_full_archive<C: pg::GenericConnection>(
+        conn: &C,
+        ctx: Context,
+        rdy: Ready,
+        channel_archiver_sender: Sender<(Channel, String)>
+    ) -> Result<(), CetrizineError> {
         let tx = conn.transaction()?;
-        
+
         pg_insert_helper!(
             tx, "ready",
             session_id => rdy.session_id.filter_null(),
@@ -864,7 +1063,7 @@ ORDER BY start_message_id ASC LIMIT 1;",
                 
 
         tx.commit()?;
-        
+
         for guild_status in &rdy.guilds {
             let guild = match guild_status {
                 serenity::model::guild::GuildStatus::OnlineGuild(g) => g,
@@ -873,199 +1072,32 @@ ORDER BY start_message_id ASC LIMIT 1;",
                     continue;
                 }
             };
-            info!("ARCHIVING GUILD {}", &guild.name);
 
-            let tx = conn.transaction()?;
+            Self::archive_guild(
+                conn,
+                &ctx,
+                guild,
+                GuildParentId::Ready(ready_rowid),
+                &channel_archiver_sender
+            )?;
+        }
 
-            pg_insert_helper!(
-                tx, "guild",
-                ready_rowid => ready_rowid, 
-                discord_id => SmartHax(guild.id), 
-                afk_channel_id => SmartHax(guild.afk_channel_id), 
-                afk_timeout => (guild.afk_timeout as i64), 
-                application_id => SmartHax(guild.application_id), 
-                default_message_notification_level => guild.default_message_notifications.into_str(),
-                explicit_content_filter => guild.explicit_content_filter.into_str(),
-                features => guild.features.clone().into_iter().map(|s| s.filter_null()).collect::<Vec<_>>(),
-                icon => guild.icon.filter_null(),
-                joined_at => guild.joined_at,
-                large => guild.large,
-                member_count => (guild.member_count as i64),
-                mfa_level => guild.mfa_level.into_str(),
-                name => guild.name.filter_null(),
-                owner_id => SmartHax(guild.owner_id),
-                region => guild.region.filter_null(),
-                splash => guild.splash.filter_null(),
-                system_channel_id => SmartHax(guild.system_channel_id),
-                verification_level => guild.verification_level.into_str(),
-                archive_recvd_at => func_start,
-            )?;            
-
-            let guild_rowid = pg_sequence_currval(&tx, "guild", "rowid")?;
-
-            let mut guild_channels = Vec::<(ChannelId,i64)>::new();
-
-            //channels
-            for (_id, chan_a_lock) in &guild.channels {
-                let chan = chan_a_lock.read();
-
-                pg_insert_helper!(
-                    tx, "guild_channel",
-                    discord_id => SmartHax(chan.id),
-                    guild_rowid => guild_rowid,
-                    guild_id => SmartHax(chan.guild_id),
-                    bitrate => chan.bitrate.map(|b| b as i64),
-                    category_id => SmartHax(chan.category_id),
-                    kind => chan.kind.into_str(),
-                    last_message_id => SmartHax(chan.last_message_id),
-                    last_pin_timestamp => chan.last_pin_timestamp,
-                    name => chan.name.filter_null(),
-                    position => chan.position,
-                    topic => chan.topic.filter_null(),
-                    user_limit => chan.user_limit.map(|u| u as i64),
-                    nsfw => chan.nsfw,
-                )?;
-
-                let chan_rowid = pg_sequence_currval(&tx, "guild_channel", "rowid")?;
-
-                guild_channels.push((chan.id.clone(), chan_rowid));
-
-                for overwrite in &chan.permission_overwrites {
-                    use serenity::model::channel::PermissionOverwriteType::*;
-                    let (ov_type_str, ov_id) = match overwrite.kind {
-                        Member(uid) => ("Member", uid.0),
-                        Role(rid) => ("Role", rid.0),
-                    };
-
-                    pg_insert_helper!(
-                        tx, "permission_overwrite",
-                        guild_channel_rowid => chan_rowid,
-                        allow_bits => PermsToSql(overwrite.allow),
-                        deny_bits => PermsToSql(overwrite.deny),
-                        permission_overwrite_type => ov_type_str,
-                        permission_overwrite_id => DbSnowflake::from(ov_id),
-                    )?;
-                }
-            }
-
-            //emojis
-            for (_, emoji) in &guild.emojis {
-                pg_insert_helper!(
-                    tx, "emoji",
-                    discord_id => SmartHax(emoji.id),
-                    guild_rowid => guild_rowid,
-                    animated => emoji.animated,
-                    name => emoji.name.filter_null(),
-                    managed => emoji.managed,
-                    require_colons => emoji.require_colons,
-                    roles => emoji.roles.clone().into_iter().map(DbSnowflake::from).collect::<Vec<_>>(),
-                )?;
-            }
-
-            //members
-            for (_, member) in &guild.members {
-                let user = member.user.read();
-
-                pg_insert_helper!(
-                    tx, "member",
-                    guild_rowid => guild_rowid,
-                    guild_id => SmartHax(member.guild_id),
-                    deaf => member.deaf,
-                    joined_at => member.joined_at,
-                    mute => member.mute,
-                    nick => member.nick.filter_null(),
-                    roles => member.roles.clone().into_iter().map(DbSnowflake::from).collect::<Vec<_>>(),
-                    user_info => DbDiscordUser::from(user.clone()),
-                )?;
-
-            }
-
-            //presences
-            for (_, presence) in &guild.presences {
-                pg_insert_helper!(
-                    tx, "user_presence",
-                    ready_rowid => (None as Option<i64>),
-                    guild_rowid => guild_rowid, //guild_rowid
-                    game => presence.game.clone().map(DbUserPresenceGame::from),
-                    last_modified => presence.last_modified.map(|v| v as i64),
-                    nick => presence.nick.filter_null(),
-                    status => presence.status.into_str(),
-                    user_id => SmartHax(presence.user_id),
-                )?;
-            }
-
-            //roles
-            for (_, role) in &guild.roles {
-                pg_insert_helper!(
-                    tx, "guild_role",
-                    discord_id => SmartHax(role.id), 
-                    guild_rowid => guild_rowid, 
-                    colour_u32 => DbDiscordColour::from(role.colour),
-                    hoist => role.hoist,
-                    managed => role.managed,
-                    mentionable => role.mentionable,
-                    name => role.name.filter_null(),
-                    permissions_bits => PermsToSql(role.permissions),
-                    position => role.position,
-                )?;
-            }
-
-            //voice_states
-            for (_, voice_state) in &guild.voice_states {
-                pg_insert_helper!(
-                    tx, "voice_state",
-                    guild_rowid => guild_rowid,
-                    channel_id => SmartHax(voice_state.channel_id),
-                    deaf => voice_state.deaf,
-                    mute => voice_state.mute,
-                    self_deaf => voice_state.self_deaf,
-                    self_mute => voice_state.self_mute,
-                    session_id => voice_state.session_id.filter_null(),
-                    suppress => voice_state.suppress,
-                    token => voice_state.token.filter_null(),
-                    user_id => SmartHax(voice_state.user_id),
-                )?;
-            }
-                               
-            tx.commit()?;
-
-            for (chan_id, _chan_rowid) in guild_channels {
-                let cell = &guild.channels[&chan_id];
-                let chan = cell.read();
-                use serenity::model::channel::ChannelType::*;
-                match chan.kind {
-                    Text => (),
-                    Private => (),
-                    Voice => continue,
-                    Group => (),
-                    Category => continue,
-                }
-
-                let perms = guild.permissions_in(chan_id, rdy.user.id);
-                if !perms.read_message_history() {
-                    info!("Skipping {}, cannot read message history", chan.name);
-                    continue;
-                }
-                Self::grab_channel_archive(
-                    &*conn,
-                    &Channel::Guild(Arc::clone(&cell)),
-                    guild.name.clone(),
-                )?;
-            } //for (chan_id, chan) in guild.id.channels()?
-        } //for guild_status in &rdy.guilds
-
-        //This is for conssitency/debugging purposes, if a certain channel is causing problems it can be annoying when it changes ordering
-        private_channels_to_archive.sort_unstable_by_key(|p| p.0);
+        //This is for consistency/debugging purposes, if a certain channel is causing problems it can be annoying when it changes ordering
+        //private_channels_to_archive.sort_unstable_by_key(|p| p.0);
 
         for chan_id in &private_channels_to_archive {
-            Self::grab_channel_archive(
+            channel_archiver_sender.send((
+                chan_id.to_channel_cached().expect("channel absolutely should be cached"),
+                String::from(""),
+            )).unwrap();
+            /*Self::grab_channel_archive(
                 &*conn,
                 &chan_id.to_channel_cached().expect("channel absolutely should be cached"),
                 String::from("")
-            )?;
+            )?;*/
         }
         
-        info!("FINISHed archiving old messages");
+        //info!("FINISHed archiving old messages");
         Ok(())
     } //fn grab_archive ...
     
@@ -1123,59 +1155,34 @@ ORDER BY start_message_id ASC LIMIT 1;",
 impl EventHandler for Handler {
     fn ready(&self, ctx: Context, ready: Ready) {
         // Discord can send multiple readys! What the fuck discord!?
-        // This is accounted for with self.currently_archiving.
-        info!("Ready event received. Connected as: {}", &ready.user.name);
-        let conn = self.pool.get().unwrap();
-        let count_that_should_be_zero:i64 = conn.query(
-            "SELECT COUNT(*) FROM ready WHERE ((user_info).inner_user).discord_id != $1;",
-            &[&i64::from(ready.user.id)],
-        ).unwrap().get(0).get(0);
-
-        if count_that_should_be_zero != 0 {
-            panic!("Error: you should always log in with the same user for the same database! Found ready with differing user id (current user is id {} aka {}#{})",ready.user.id.0,ready.user.name,ready.user.discriminator);
-        }
-
-        let archiving_mutex = Arc::clone(&self.currently_archiving);
-        std::thread::spawn(move || {
-            let _lock = match archiving_mutex.try_lock() {
-                Ok(v) => v,
-                Err(_) => {
-                    warn!("Received ready when already started archiving, ignoring");
-                    return
-                },
-            };
-            let do_archiving = false || true;
-            if do_archiving {
-                let res = Self::grab_full_archive(&*conn, ctx, ready);
-                if let Err(CetrizineError{backtrace: bt, error_type: CetrizineErrorType::Serenity(serenity::Error::Http(serenity::prelude::HttpError::UnsuccessfulRequest(mut http_response)))}) = res {
-                    warn!(
-                        "HTTP error!\n\nHTTP response: {:?}\n\nBacktrace: {:?}",
-                        bt,
-                        http_response
-                    );
-                    let mut body = String::new();
-                    std::io::Read::read_to_string(&mut http_response, &mut body).expect("could not read http body");
-                    warn!("HTTP body: {:?}", body);
-                }else{ res.expect("Unable to grab archive") }
-            }
-        });
+        // This is okay, at worst there'll be multiple channels to
+        // archive in the queue.
+        log_any_error!(self.ready_result(ctx, ready));
     }
 
     fn message(&self, ctx: Context, msg: Message) {
         //if true { return }
-        print_any_error!(self.message_result(ctx, msg));
+        log_any_error!(self.message_result(ctx, msg));
     }
 
-    fn channel_create(&self, ctx: Context, channel: Arc<RwLock<GuildChannel>>) {
-        print_any_error!(self._channel_create(ctx, channel));
-    }
+    /*fn channel_create(&self, ctx: Context, channel: Arc<RwLock<GuildChannel>>) {
+        log_any_error!(self._channel_create(ctx, channel));
+    }*/
 
     fn raw_websocket_packet(&self, ctx: Context, packet: RawEvent) {
-        print_any_error!(self.archive_raw_event(ctx, packet));
+        log_any_error!(self.archive_raw_event(ctx, packet));
     }
 
     fn shard_stage_update(&self, ctx: Context, ssue: ShardStageUpdateEvent) {
-        print_any_error!(self.record_shard_stage_update(ctx, ssue));
+        log_any_error!(self.record_shard_stage_update(ctx, ssue));
+    }
+
+    fn guild_create(&self, ctx: Context, guild: Guild, is_new: bool) {
+        log_any_error!(self.guild_create_result(ctx, guild, is_new));
+    }
+
+    fn channel_update(&self, _ctx: Context, _old: Option<Channel>, _new: Channel) {
+        //guild.permissions_in(chan_id, UserId(uid)).read_message_history()
     }
 }
 
@@ -1301,30 +1308,57 @@ DB migration version: {}",
         session_id = pg_sequence_currval(&*setup_conn, "run_session", "rowid").unwrap();
     }
 
-    SESSION_ID.store(session_id, std::sync::atomic::Ordering::Relaxed);
+    SESSION_ID.store(session_id, Ordering::Relaxed);
+
+    let (chan_tx, chan_rx) = mpsc::channel();
+    let arc_pool = Arc::new(pool);
 
     let handler = Handler{
-        pool,
-        currently_archiving: Arc::new(Mutex::new(())),
+        pool: Arc::clone(&arc_pool),
         beginning_of_time,
-        //started_at,
         session_id,
+        archival_queue: Mutex::new(chan_tx),
     };
     let mut client = Client::new(&discord_token, handler).expect("Err creating client");
+
+    let threads_arc_pool = Arc::clone(&arc_pool);
+    std::thread::spawn(move || {
+        while let Ok((channel, guild_name)) = chan_rx.recv() {
+            if let Some(conn) = log_any_error!(threads_arc_pool.get()) {
+                let res = Handler::grab_channel_archive(&*conn, &channel, guild_name);
+                if let Err(CetrizineError{backtrace: bt, error_type: CetrizineErrorType::Serenity(serenity::Error::Http(serenity::prelude::HttpError::UnsuccessfulRequest(mut http_response)))}) = res {
+                    warn!(
+                        "HTTP error!\n\nHTTP response: {:?}\n\nBacktrace: {:?}",
+                        bt,
+                        http_response
+                    );
+                    let mut body = String::new();
+                    match std::io::Read::read_to_string(&mut http_response, &mut body) {
+                        Ok(body) => warn!("HTTP body: {:?}", body),
+                        Err(why) => warn!("could not read http body {:?}", why),
+                    }
+                }else{ log_any_error!(res); }
+            }
+        }
+    });
+
+    let is_bot;
     if discord_token.starts_with("Bot ") {
         info!("Detected bot token, running with commands enabled");
-        client.with_framework(
-            StandardFramework::new()
-                .configure(|c| c.prefix("~"))
-                .cmd("ping", ping)
-        );
+        client.with_framework(commands::cetrizine_framework());
+        is_bot = true;
     }else{
         info!("Found non-bot token, will not respond to commands");
+        is_bot = false;
+    }
+
+    {
+        let mut data = client.data.lock();
+        data.insert::<PoolArcKey>(Arc::clone(&arc_pool));
+        data.insert::<IsBotBoolKey>(is_bot);
     }
     
     client.start().expect("Error starting client");
 }
 
-command!(ping(_context, message) {
-    let _ = message.reply("Pong!");
-});
+    

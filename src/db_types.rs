@@ -1,7 +1,111 @@
 use crate::serenity::model::prelude::*;
+use crate::serenity::client::bridge::gateway::ShardId;
 use crate::serenity::utils::Colour;
+use crate::pg::types::{IsNull,Type,ToSql,FromSql};
 use crate::FilterExt;
 use crate::EnumIntoString;
+
+use std::error::Error;
+use std::fmt::Debug;
+
+pub trait Snowflake {
+    fn get_snowflake(&self) -> u64;
+
+    fn get_snowflake_i64(&self) -> i64 {
+        self.get_snowflake() as i64
+    }
+}
+
+macro_rules! snowflake_impl {
+    ($klass:ty) => {
+        impl Snowflake for $klass {
+            fn get_snowflake(&self) -> u64 {
+                self.0
+            }
+        }
+
+        impl Snowflake for &$klass {
+            fn get_snowflake(&self) -> u64 {
+                self.0
+            }
+        }
+    };
+}
+
+snowflake_impl!{ApplicationId}
+snowflake_impl!{AuditLogEntryId}
+snowflake_impl!{ChannelId}
+snowflake_impl!{EmojiId}
+snowflake_impl!{GuildId}
+snowflake_impl!{IntegrationId}
+snowflake_impl!{MessageId}
+snowflake_impl!{RoleId}
+snowflake_impl!{UserId}
+snowflake_impl!{WebhookId}
+snowflake_impl!{ShardId}
+
+#[derive(Debug)]
+pub struct SmartHax<T: Debug>(pub T);
+
+impl<T: Snowflake + Debug> ToSql for SmartHax<T>{
+    fn to_sql(&self,
+              ty: &Type,
+              out: &mut Vec<u8>) -> Result<IsNull, Box<dyn Error + 'static + Sync + Send>> {
+        DbSnowflake::from(self.0.get_snowflake_i64()).to_sql(ty, out)
+    }
+
+    fn accepts(ty: &Type) -> bool {
+        <DbSnowflake as ToSql>::accepts(ty)
+    }
+
+    to_sql_checked!{}
+}
+
+impl<U: Snowflake + Debug> ToSql for SmartHax<Option<U>>{
+    fn to_sql(&self,
+              ty: &Type,
+              out: &mut Vec<u8>) -> Result<IsNull, Box<dyn Error + 'static + Sync + Send>> {
+        self.0.as_ref().map(|v| DbSnowflake::from(Snowflake::get_snowflake_i64(v))).to_sql(ty, out)
+    }
+
+    fn accepts(ty: &Type) -> bool {
+        <Option<DbSnowflake> as ToSql>::accepts(ty)
+    }
+
+    to_sql_checked!{}
+}
+
+#[derive(Debug)]
+pub struct PermsToSql(pub serenity::model::permissions::Permissions);
+
+impl ToSql for PermsToSql{
+    fn to_sql(&self,
+              ty: &Type,
+              out: &mut Vec<u8>) -> Result<IsNull, Box<dyn Error + 'static + Sync + Send>> {
+        let val_u:u64 = self.0.bits();
+        let val_i:i64 = i64::from_le_bytes(val_u.to_le_bytes());
+        val_i.to_sql(ty, out)
+    }
+
+    fn accepts(ty: &Type) -> bool {
+        <i64 as ToSql>::accepts(ty)
+    }
+
+    to_sql_checked!{}
+}
+
+impl FromSql for PermsToSql{
+    fn from_sql(ty: &Type,
+                raw: &[u8]) -> Result<Self, Box<dyn Error + 'static + Sync + Send>> {
+        let val_i = <i64 as FromSql>::from_sql(ty, raw)?;
+        let val_u:u64 = u64::from_le_bytes(val_i.to_le_bytes());
+        Ok(Self(serenity::model::permissions::Permissions::from_bits_truncate(val_u)))
+    }
+
+    fn accepts(ty: &pg::types::Type) -> bool {
+        <i64 as FromSql>::accepts(ty)
+    }
+}
 
 #[derive(Copy,Clone,Debug,FromSql,ToSql)]
 #[postgres(name = "snowflake")]
@@ -302,9 +406,30 @@ impl DbMoment {
         })
     }
 
-    #[allow(dead_code)] //todo
     pub fn from_rawevent(session_id: i64, beginning_of_time: std::time::Instant, ev: serenity::model::event::RawEvent) -> Self {
         let duration = ev.happened_at_instant.duration_since(beginning_of_time);
         Self::from_pieces(session_id, ev.happened_at_chrono, duration)
     }
 }
+
+#[derive(Debug,Clone,Copy)]
+pub enum GuildParentId {
+    Ready(i64),
+    CreateEvent(i64),
+}
+
+impl GuildParentId {
+    pub fn as_ready(&self) -> Option<i64> {
+        match self {
+            GuildParentId::Ready(v) => Some(*v),
+            _ => None,
+        }
+    }
+    
+    pub fn as_create_event(&self) -> Option<i64> {
+        match self {
+            GuildParentId::CreateEvent(v) => Some(*v),
+            _ => None,
+        }
+    }
+}    

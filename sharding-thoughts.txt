@@ -1,0 +1,6 @@
+Cetrizine may need to be sharded at some point.
+Discord delegates to shards based on guild_id modulo number of shards
+
+a cache column could be made that is the last *n* bits of the guild_id, as a string, in reverse order (LSB to MSB)
+
+That way, as long as the number of shards is a power of two, we can efficiently retrieve rows with said cache column
