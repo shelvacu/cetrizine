@@ -150,22 +150,6 @@ pub trait EnumIntoString : Sized {
     fn from_str<'a>(input: &'a str) -> Option<Self>;
 }
 
-trait OptionExt {
-    type Inner;
-    fn collapse(self) -> Option<Self::Inner>;
-}
-
-impl<T> OptionExt for Option<Option<T>> {
-    type Inner = T;
-    fn collapse(self) -> Option<Self::Inner> {
-        match self {
-            None => None,
-            Some(None) => None,
-            Some(Some(inner)) => Some(inner),
-        }
-    }
-}
-
 pub trait FilterExt {
     type Return;
     fn filter_null(&self) -> Self::Return;
@@ -222,7 +206,7 @@ impl FilterExt for Option<String> {
 impl FilterExt for Option<Option<String>> {
     type Return = Option<String>;
     fn filter_null(&self) -> Self::Return {
-        self.clone().collapse().filter_null()
+        self.clone().flatten().filter_null()
     }
 }
 

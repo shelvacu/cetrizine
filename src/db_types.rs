@@ -397,3 +397,40 @@ impl GuildParentId {
         }
     }
 }    
+
+#[derive(Clone,Debug,ToSql,FromSql)]
+#[postgres(name = "__t_moment")]
+pub struct DbMomentInner{
+    session_id: i64,
+    duration_secs: i64,
+    duration_nanos: i32,
+    datetime: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Clone,Debug,ToSql,FromSql)]
+#[postgres(name = "moment")]
+pub struct DbMoment(pub DbMomentInner);
+
+impl DbMoment {
+    #[inline]
+    pub fn now(session_id: i64, beginning_of_time: std::time::Instant) -> Self {
+        let duration = beginning_of_time.elapsed();
+        let ts = chrono::Utc::now();
+        Self::from_pieces(session_id, ts, duration)
+    }
+
+    pub fn from_pieces(session_id: i64, chrono: chrono::DateTime<chrono::Utc>, duration: std::time::Duration) -> Self {
+        Self(DbMomentInner{
+            session_id,
+            duration_secs: duration.as_secs() as i64,
+            duration_nanos: duration.subsec_nanos() as i32,
+            datetime: chrono
+        })
+    }
+
+    #[allow(dead_code)]
+    pub fn from_rawevent(session_id: i64, beginning_of_time: std::time::Instant, ev: serenity::model::event::RawEvent) -> Self {
+        let duration = ev.happened_at_instant.duration_since(beginning_of_time);
+        Self::from_pieces(session_id, ev.happened_at_chrono, duration)
+    }
+}
