@@ -5,6 +5,9 @@
 #![feature(option_flattening)]
 #![deny(unused_must_use)]
 
+#[macro_use]
+extern crate lazy_static;
+
 //Crates for debugging/logging
 #[macro_use]
 extern crate log;
@@ -34,11 +37,12 @@ extern crate typemap;
 extern crate chrono;
 extern crate time;
 
+//This crate allows calling cargo and getting structured output
+extern crate coral;
+
 use backtrace::Backtrace;
 
 use r2d2_postgres::r2d2;
-
-//use pg::types::{IsNull,Type,ToSql,FromSql};
 
 use chrono::prelude::{DateTime,Utc};
 
@@ -48,16 +52,24 @@ use serenity::{
     prelude::*,
     client::bridge::gateway::{
         event::ShardStageUpdateEvent,
+        ShardManager,
         //ShardId,
     },
 };
 
 use std::sync::{
-    Mutex,
+    Mutex as StdMutex,
     Arc,
     mpsc::{self, Sender},
-    atomic::{Ordering, AtomicI64, AtomicU64},
+    atomic::{
+        Ordering,
+        AtomicI64,
+        AtomicU64,
+    },
 };
+use std::process;
+use std::os::unix::process::CommandExt;
+use std::ffi::OsString;
 
 macro_rules! pg_insert_helper {
     ($db:ident, $table_name:expr, $( $column_name:ident => $column_value:expr , )+ ) => {{
@@ -112,6 +124,12 @@ const DISCORD_MAX_SNOWFLAKE:u64 = 9223372036854775807;
 
 static SESSION_ID:AtomicI64 = AtomicI64::new(0);
 static USER_ID:AtomicU64 = AtomicU64::new(0);
+lazy_static! {
+    static ref DO_RE_EXEC:StdMutex<Option<u64>> = StdMutex::new(None);
+}
+lazy_static! {
+    static ref SENT_REBOOT_NOTIF:StdMutex<bool> = StdMutex::new(false);
+}
 
 struct PoolArcKey;
 impl typemap::Key for PoolArcKey {
@@ -121,6 +139,11 @@ impl typemap::Key for PoolArcKey {
 struct IsBotBoolKey;
 impl typemap::Key for IsBotBoolKey {
     type Value = bool;
+}
+
+struct ShardManagerArcKey;
+impl typemap::Key for ShardManagerArcKey {
+    type Value = Arc<Mutex<ShardManager>>;
 }
 
 trait ContextExt {
@@ -142,7 +165,7 @@ struct Handler{
     pool: Arc<r2d2::Pool<r2d2_postgres::PostgresConnectionManager>>,
     beginning_of_time: std::time::Instant,
     session_id: i64,
-    archival_queue: Mutex<Sender<(Channel, String)>>,
+    archival_queue: StdMutex<Sender<(Channel, String)>>,
 }
 
 pub trait EnumIntoString : Sized {
@@ -437,9 +460,20 @@ impl Handler {
     }
 
     fn ready_result(&self, ctx: Context, ready: Ready) -> Result<(), CetrizineError> {
-        info!("Ready event received. Connected as: {}", &ready.user.name);
-        let conn = self.pool.get()?;
         USER_ID.store(ready.user.id.0, Ordering::Relaxed);
+        info!("Ready event received. Connected as: {}", &ready.user.name);
+        match std::env::var("RE_EXECD") {
+            Ok(val) => {
+                let chan_id:u64 = val.parse().unwrap();
+                let mut sent_notif = SENT_REBOOT_NOTIF.lock().unwrap();
+                if !*sent_notif {
+                    ChannelId(chan_id).send_message(|m| m.content("Reboot finished"))?;
+                    *sent_notif = true;
+                }
+            }
+            Err(_) => (),
+        }
+        let conn = self.pool.get()?;
 
         let is_bot = ctx.is_bot();
         if is_bot && !ready.user.bot {
@@ -453,7 +487,9 @@ impl Handler {
             // It's not an error because we continue on just fine...
             warn!("The given token appeared to be a user token but discord tells us a bot. Commands are currently disabled.");
         }
-        
+        if !is_bot && !ready.user.bot {
+            ctx.shard.set_status(OnlineStatus::Idle)
+        }
         let count_that_should_be_zero:i64 = conn.query(
             "SELECT COUNT(*) FROM ready WHERE ((user_info).inner_user).discord_id != $1;",
             &[&i64::from(ready.user.id)],
@@ -962,11 +998,6 @@ ORDER BY start_message_id ASC LIMIT 1;",
                 Channel::Guild(Arc::clone(&cell)),
                 guild.name.clone(),
             )).unwrap();
-            /*Self::grab_channel_archive(
-            &*conn,
-            &Channel::Guild(Arc::clone(&cell)),
-            guild.name.clone(),
-        )?;*/
         } //for (chan_id, chan) in guild.id.channels()?
         Ok(())
     }
@@ -1074,19 +1105,13 @@ ORDER BY start_message_id ASC LIMIT 1;",
                 chan_id.to_channel_cached().expect("channel absolutely should be cached"),
                 String::from(""),
             )).unwrap();
-            /*Self::grab_channel_archive(
-                &*conn,
-                &chan_id.to_channel_cached().expect("channel absolutely should be cached"),
-                String::from("")
-            )?;*/
         }
-        
-        //info!("FINISHed archiving old messages");
         Ok(())
     } //fn grab_archive ...
     
     fn message_result(&self, _: Context, msg: Message) -> Result<(), CetrizineError> {
         let handler_start = Utc::now();
+        //let kill_command = "shift alt bloodbath";
         let conn = self.pool.get()?;
         let guild_str;
         if let Some(guild_id) = msg.guild_id {
@@ -1133,8 +1158,52 @@ ORDER BY start_message_id ASC LIMIT 1;",
             shard_id => SmartHax(ssue.shard_id),
         )?;
         Ok(())
-    }       
-}   
+    }
+
+    fn channel_update_result(&self, _context: Context, old: Option<Channel>, new: Channel) -> Result<(), CetrizineError> {
+        let channel_archiver_sender = self.archival_queue.lock().unwrap().clone();
+        let maybe_guild_lock = match &new {
+            Channel::Guild(guild_channel_lock) => match guild_channel_lock.read().guild_id.to_guild_cached() {
+                Some(g) => Some(g),
+                None => {
+                    warn!("Received a channel update event but guild was not cached");
+                    None
+                }
+            },
+            _ => None,
+        };
+        //let () = maybe_guild_lock;
+        let user_id = UserId(USER_ID.load(Ordering::Relaxed));
+        if let (Some(guild_lock),Some(old)) = (maybe_guild_lock.as_ref(), old.as_ref()) {
+            let guild = guild_lock.read();
+            if !guild.permissions_in(old.id(), user_id).read_message_history() && guild.permissions_in(new.id(), user_id).read_message_history() {
+                channel_archiver_sender.send((
+                    new.clone(),
+                    guild.name.clone(),
+                )).unwrap();
+            }
+        } else {
+            channel_archiver_sender.send((
+                new.clone(),
+                match maybe_guild_lock {
+                    Some(guild_lock) => guild_lock.read().name.clone(),
+                    None => String::from(""),
+                }
+            )).unwrap();
+        }
+        Ok(())
+    }
+
+    fn guild_member_update_result(&self, _context: Context, _old: Option<Member>, new: Member) -> Result<(), CetrizineError> {
+        let my_id = UserId(USER_ID.load(Ordering::Relaxed));
+        if new.user_id() == my_id {
+            //Oh hey, that's me! I got updated.
+            //TODO
+        }
+        //let () = old;
+        Ok(())
+    }
+}
 
 impl EventHandler for Handler {
     fn ready(&self, ctx: Context, ready: Ready) {
@@ -1165,184 +1234,205 @@ impl EventHandler for Handler {
         log_any_error!(self.guild_create_result(ctx, guild, is_new));
     }
 
-    fn channel_update(&self, _ctx: Context, _old: Option<Channel>, _new: Channel) {
-        //guild.permissions_in(chan_id, UserId(uid)).read_message_history()
+    fn channel_update(&self, context: Context, old: Option<Channel>, new: Channel) {
+        log_any_error!(self.channel_update_result(context, old, new));
+    }
+
+    fn guild_member_update(&self, context: Context, old: Option<Member>, new: Member) {
+        log_any_error!(self.guild_member_update_result(context, old, new));
     }
 }
 
 fn main() {
     use argparse::{ArgumentParser, StoreTrue, StoreOption, Store, Print};
-    let beginning_of_time = std::time::Instant::now();
-    let started_at = chrono::Utc::now();
-    //let mut verbose = false;
-    let mut do_migrate = false;
-    let mut discord_token = String::from("");
-    let mut postgres_path_opt:Option<String> = None;
-    let mut no_auto_migrate = false;
-    let mut migrate_only = false;
-    let mut init_db = false;
-
     {
-        let mut ap = ArgumentParser::new();
-        ap.set_description("A discord bot for recording/archiving");
-        ap.refer(&mut do_migrate)
-            .add_option(&["--sqlite-migration"], StoreTrue,
-                        "Perform a migration from a legacy SQLite database. Put the db file name in DATABASE_FILENAME");
-        ap.refer(&mut discord_token)
-            .envvar("DISCORD_TOKEN")
-            .required()
-            .add_option(&["-t", "--token"], Store,
-                        "Discord API token to use. Can also be provided in environment variable DISCORD_TOKEN");
-        ap.add_option(
-            &["-V", "-v", "--version"],
-            Print(format!(
-                "{} {}
+        let beginning_of_time = std::time::Instant::now();
+        let started_at = chrono::Utc::now();
+        //let mut verbose = false;
+        let mut do_migrate = false;
+        let mut discord_token = String::from("");
+        let mut postgres_path_opt:Option<String> = None;
+        let mut no_auto_migrate = false;
+        let mut migrate_only = false;
+        let mut init_db = false;
+
+        {
+            let mut ap = ArgumentParser::new();
+            ap.set_description("A discord bot for recording/archiving");
+            ap.refer(&mut do_migrate)
+                .add_option(&["--sqlite-migration"], StoreTrue,
+                            "Perform a migration from a legacy SQLite database. Put the db file name in DATABASE_FILENAME");
+            ap.refer(&mut discord_token)
+                .envvar("DISCORD_TOKEN")
+                .required()
+                .add_option(&["-t", "--token"], Store,
+                            "Discord API token to use. Can also be provided in environment variable DISCORD_TOKEN");
+            ap.add_option(
+                &["-V", "-v", "--version"],
+                Print(format!(
+                    "{} {}
 Target triple: {}
 Built at: {}
 Commit: {} committed on {}
 DB migration version: {}",
-                env!("CARGO_PKG_NAME"),
-                env!("CARGO_PKG_VERSION"),
-                env!("VERGEN_TARGET_TRIPLE"),
-                env!("VERGEN_BUILD_TIMESTAMP"),
-                env!("VERGEN_SHA"),
-                env!("VERGEN_COMMIT_DATE"),
-                migrations::CURRENT_MIGRATION_VERSION),
-            ),
-            "Show version"
-        );
-        ap.refer(&mut postgres_path_opt)
+                    env!("CARGO_PKG_NAME"),
+                    env!("CARGO_PKG_VERSION"),
+                    env!("VERGEN_TARGET_TRIPLE"),
+                    env!("VERGEN_BUILD_TIMESTAMP"),
+                    env!("VERGEN_SHA"),
+                    env!("VERGEN_COMMIT_DATE"),
+                    migrations::CURRENT_MIGRATION_VERSION),
+                ),
+                "Show version"
+            );
+            ap.refer(&mut postgres_path_opt)
             //.envvar("PG_PATH")
-            .required()
-            .add_option(&["-p", "--postgres-path"], StoreOption,
-                        "postgres connection path");
-        ap.refer(&mut no_auto_migrate)
-            .add_option(&["--no-auto-migrate"], StoreTrue,
-                        "Don't automatically perform database migrations");
-        ap.refer(&mut migrate_only)
-            .add_option(&["--migrate-only"], StoreTrue,
-                        "Perform any neccesary database migrations and exit");
-        ap.refer(&mut init_db)
-            .add_option(&["--init-db"], StoreTrue,
-                        "Initializes the database schema. Note that the `CREATE DATABASE` command needs to be run separately. This will also run the program normally unless --migrate-only is specified.");
-        ap.parse_args_or_exit()
-    }
+                .required()
+                .add_option(&["-p", "--postgres-path"], StoreOption,
+                            "postgres connection path");
+            ap.refer(&mut no_auto_migrate)
+                .add_option(&["--no-auto-migrate"], StoreTrue,
+                            "Don't automatically perform database migrations");
+            ap.refer(&mut migrate_only)
+                .add_option(&["--migrate-only"], StoreTrue,
+                            "Perform any neccesary database migrations and exit");
+            ap.refer(&mut init_db)
+                .add_option(&["--init-db"], StoreTrue,
+                            "Initializes the database schema. Note that the `CREATE DATABASE` command needs to be run separately. This will also run the program normally unless --migrate-only is specified.");
+            ap.parse_args_or_exit()
+        }
 
-    let postgres_path = postgres_path_opt.unwrap();
+        let postgres_path = postgres_path_opt.unwrap();
 
-    let manager = r2d2_postgres::PostgresConnectionManager::new(postgres_path.as_str(), r2d2_postgres::TlsMode::None).unwrap();
-    let pool = r2d2::Pool::new(manager).unwrap();
+        let manager = r2d2_postgres::PostgresConnectionManager::new(postgres_path.as_str(), r2d2_postgres::TlsMode::None).unwrap();
+        let pool = r2d2::Pool::new(manager).unwrap();
 
-    let simple_logger_config = simplelog::Config{
-        time: Some(simplelog::Level::Info),
-        level: Some(simplelog::Level::Info),
-        target: Some(simplelog::Level::Info),
-        location: Some(simplelog::Level::Info),
-        .. Default::default()
-    };
-    let simple_logger = simplelog::SimpleLogger::new(simplelog::LevelFilter::Info, simple_logger_config);
-    let pg_logger = Box::new(
-        postgres_logger::PostgresLogger::new(
-            pool.clone(),
-            log::Level::Info,
-            beginning_of_time
-        )
-    );
-    multi_log::MultiLogger::init(vec![simple_logger, pg_logger], simplelog::Level::Info).expect("Failed to intialize logging.");
-    info!("Cetrizine logging initialized.");
-    
-    if do_migrate {
-        legacy::migrate_sqlite_to_postgres(&postgres_path);
-        info!("Finished legacy sqlite migration");
-        std::process::exit(0);
-    }
-    
-    let session_id;
-    {
-        let setup_conn = pool.get().unwrap();
-        if init_db {
-            let tx = setup_conn.transaction().unwrap();
-            tx.batch_execute(migrations::DB_INIT_SQL).unwrap();
+        let simple_logger_config = simplelog::Config{
+            time: Some(simplelog::Level::Info),
+            level: Some(simplelog::Level::Info),
+            target: Some(simplelog::Level::Info),
+            location: Some(simplelog::Level::Info),
+            .. Default::default()
+        };
+        let simple_logger = simplelog::SimpleLogger::new(simplelog::LevelFilter::Info, simple_logger_config);
+        let pg_logger = Box::new(
+            postgres_logger::PostgresLogger::new(
+                pool.clone(),
+                log::Level::Info,
+                beginning_of_time
+            )
+        );
+        multi_log::MultiLogger::init(vec![simple_logger, pg_logger], simplelog::Level::Info).expect("Failed to intialize logging.");
+        info!("Cetrizine logging initialized.");
+        
+        if do_migrate {
+            legacy::migrate_sqlite_to_postgres(&postgres_path);
+            info!("Finished legacy sqlite migration");
+            std::process::exit(0);
+        }
+        
+        let session_id;
+        {
+            let setup_conn = pool.get().unwrap();
+            if init_db {
+                let tx = setup_conn.transaction().unwrap();
+                tx.batch_execute(migrations::DB_INIT_SQL).unwrap();
+                pg_insert_helper!(
+                    tx, "migration_version",
+                    version => 7i64,
+                ).unwrap();
+                tx.commit().unwrap();
+            }
+            if migrate_only || init_db || !no_auto_migrate {
+                migrations::do_postgres_migrate(&*setup_conn);
+                if migrate_only { std::process::exit(0); }
+            } else {
+                if !migrations::migration_is_current(&*setup_conn) {
+                    panic!("Migration version mismatch, no auto migrate, aborting.");
+                }
+            }
+
             pg_insert_helper!(
-                tx, "migration_version",
-                version => 7i64,
+                setup_conn, "run_session",
+                started_at => started_at,
+                pkg_name => env!("CARGO_PKG_NAME"),
+                version => env!("CARGO_PKG_VERSION"),
+                target => env!("VERGEN_TARGET_TRIPLE"),
+                build_timestamp => env!("VERGEN_BUILD_TIMESTAMP"),
+                git_sha_ref => env!("VERGEN_SHA"),
+                git_commit_date => env!("VERGEN_COMMIT_DATE"),
             ).unwrap();
-            tx.commit().unwrap();
+
+            session_id = pg_sequence_currval(&*setup_conn, "run_session", "rowid").unwrap();
         }
-        if migrate_only || init_db || !no_auto_migrate {
-            migrations::do_postgres_migrate(&*setup_conn);
-            if migrate_only { std::process::exit(0); }
-        } else {
-            if !migrations::migration_is_current(&*setup_conn) {
-                panic!("Migration version mismatch, no auto migrate, aborting.");
+
+        SESSION_ID.store(session_id, Ordering::Relaxed);
+
+        let (chan_tx, chan_rx) = mpsc::channel();
+        let arc_pool = Arc::new(pool);
+
+        let handler = Handler{
+            pool: Arc::clone(&arc_pool),
+            beginning_of_time,
+            session_id,
+            archival_queue: StdMutex::new(chan_tx),
+        };
+        let mut client = Client::new(&discord_token, handler).expect("Err creating client");
+
+        let threads_arc_pool = Arc::clone(&arc_pool);
+        std::thread::spawn(move || {
+            while let Ok((channel, guild_name)) = chan_rx.recv() {
+                if let Some(conn) = log_any_error!(threads_arc_pool.get()) {
+                    let res = Handler::grab_channel_archive(&*conn, &channel, guild_name);
+                    if let Err(CetrizineError{backtrace: bt, error_type: CetrizineErrorType::Serenity(serenity::Error::Http(serenity::prelude::HttpError::UnsuccessfulRequest(mut http_response)))}) = res {
+                        warn!(
+                            "HTTP error!\n\nHTTP response: {:?}\n\nBacktrace: {:?}",
+                            bt,
+                            http_response
+                        );
+                        let mut body = String::new();
+                        match std::io::Read::read_to_string(&mut http_response, &mut body) {
+                            Ok(body) => warn!("HTTP body: {:?}", body),
+                            Err(why) => warn!("could not read http body {:?}", why),
+                        }
+                    }else{ log_any_error!(res); }
+                }
             }
+        });
+
+        let is_bot;
+        if discord_token.starts_with("Bot ") {
+            info!("Detected bot token, running with commands enabled");
+            client.with_framework(commands::cetrizine_framework());
+            is_bot = true;
+        }else{
+            info!("Found non-bot token, will not respond to commands");
+            is_bot = false;
         }
 
-        pg_insert_helper!(
-            setup_conn, "run_session",
-            started_at => started_at,
-            pkg_name => env!("CARGO_PKG_NAME"),
-            version => env!("CARGO_PKG_VERSION"),
-            target => env!("VERGEN_TARGET_TRIPLE"),
-            build_timestamp => env!("VERGEN_BUILD_TIMESTAMP"),
-            git_sha_ref => env!("VERGEN_SHA"),
-            git_commit_date => env!("VERGEN_COMMIT_DATE"),
-        ).unwrap();
-
-        session_id = pg_sequence_currval(&*setup_conn, "run_session", "rowid").unwrap();
-    }
-
-    SESSION_ID.store(session_id, Ordering::Relaxed);
-
-    let (chan_tx, chan_rx) = mpsc::channel();
-    let arc_pool = Arc::new(pool);
-
-    let handler = Handler{
-        pool: Arc::clone(&arc_pool),
-        beginning_of_time,
-        session_id,
-        archival_queue: Mutex::new(chan_tx),
-    };
-    let mut client = Client::new(&discord_token, handler).expect("Err creating client");
-
-    let threads_arc_pool = Arc::clone(&arc_pool);
-    std::thread::spawn(move || {
-        while let Ok((channel, guild_name)) = chan_rx.recv() {
-            if let Some(conn) = log_any_error!(threads_arc_pool.get()) {
-                let res = Handler::grab_channel_archive(&*conn, &channel, guild_name);
-                if let Err(CetrizineError{backtrace: bt, error_type: CetrizineErrorType::Serenity(serenity::Error::Http(serenity::prelude::HttpError::UnsuccessfulRequest(mut http_response)))}) = res {
-                    warn!(
-                        "HTTP error!\n\nHTTP response: {:?}\n\nBacktrace: {:?}",
-                        bt,
-                        http_response
-                    );
-                    let mut body = String::new();
-                    match std::io::Read::read_to_string(&mut http_response, &mut body) {
-                        Ok(body) => warn!("HTTP body: {:?}", body),
-                        Err(why) => warn!("could not read http body {:?}", why),
-                    }
-                }else{ log_any_error!(res); }
-            }
+        {
+            let mut data = client.data.lock();
+            data.insert::<PoolArcKey>(Arc::clone(&arc_pool));
+            data.insert::<IsBotBoolKey>(is_bot);
+            let shard_manager_arc = Arc::clone(&client.shard_manager);
+            data.insert::<ShardManagerArcKey>(shard_manager_arc);
         }
-    });
-
-    let is_bot;
-    if discord_token.starts_with("Bot ") {
-        info!("Detected bot token, running with commands enabled");
-        client.with_framework(commands::cetrizine_framework());
-        is_bot = true;
-    }else{
-        info!("Found non-bot token, will not respond to commands");
-        is_bot = false;
+        
+        client.start().expect("Error starting client");
     }
 
-    {
-        let mut data = client.data.lock();
-        data.insert::<PoolArcKey>(Arc::clone(&arc_pool));
-        data.insert::<IsBotBoolKey>(is_bot);
+    //If we get to this point, that means the client shut down gracefully.
+
+    let do_re_exec = DO_RE_EXEC.lock().unwrap().clone();
+    if let Some(chan_id) = do_re_exec {
+        let args:Vec<OsString> = std::env::args_os().collect();
+        let chan_str = format!("{}", chan_id);
+        let err = process::Command::new(&args[0])
+            .args(&args[1..])
+            .env("RE_EXECD", chan_str)
+            .exec();
+        error!("Error re-execing: {:?}", err);
     }
-    
-    client.start().expect("Error starting client");
 }
 
     

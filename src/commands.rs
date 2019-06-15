@@ -1,8 +1,10 @@
 use crate::{
     USER_ID,
+    DO_RE_EXEC,
     ContextExt,
     CetrizineError,
     PoolArcKey,
+    ShardManagerArcKey,
     db_types::SmartHax,
     r2d2,
     r2d2_postgres,
@@ -10,7 +12,11 @@ use crate::{
 use serenity::{
     model::prelude::*,
     prelude::*,
-    framework::standard::StandardFramework,
+    framework::standard::{
+        StandardFramework,
+        Args,
+        //CommandOptions,
+    }
 };
 
 use std::sync::Arc;
@@ -35,16 +41,10 @@ fn some_kind_of_uppercase_first_letter(s: &str) -> String {
     }
 }
 
-macro_rules! command_log {
-    ($fname:ident($($arg:ident),+) $b:block) => {
-        command!($fname($($arg),+) {
-            let res:Result<(), CetrizineError> = $b;
-            log_any_error!(res);
-        });
-    };
-}
-
 pub fn cetrizine_framework() -> StandardFramework {
+    let owners = vec![
+        UserId(165858230327574528)
+    ].into_iter().collect();
     StandardFramework::new()
         .configure(
             |c| c
@@ -54,8 +54,11 @@ pub fn cetrizine_framework() -> StandardFramework {
                 .allow_whitespace(true)
                 .on_mention(true)
                 .no_dm_prefix(true)
+                .owners(owners)
         )
         .cmd("ping", ping)
+        .cmd("Ping!", ping)
+        .cmd("🏓", ping) //table tennis paddle
         .cmd("setprefix", set_prefix)
         .cmd("set prefix", set_prefix)
         .cmd("set_prefix", set_prefix)
@@ -67,20 +70,189 @@ pub fn cetrizine_framework() -> StandardFramework {
         .cmd("p", get_prefix)
         .cmd("info", help_info)
         .cmd("help", help_info)
+        .cmd("\u{2139}", help_info) //information
+        .cmd("\u{2139}\u{fe0f}", help_info) //information
         .cmd("binary", binary)
+        .cmd("b", binary)
+        .cmd("binarydecode", binary_de)
+        .cmd("bd", binary_de)
+        .cmd("binaryencode", binary_en)
+        .cmd("be", binary_en)
+        .cmd("pony", pony)
+        .cmd("horse", horse)
+        .command(
+            "r&r",
+            |c| c
+                .owners_only(true)
+                .cmd(recompile_and_run)
+        )
+        .command(
+            "restartshard",
+            |c| c
+                .owners_only(true)
+                .cmd(restart_shard)
+        )
+        .command(
+            "sendraw",
+            |c| c
+                .owners_only(true)
+                .cmd(send_raw)
+        )
 }
 
+macro_rules! command_log {
+    ($fname:ident($($arg:ident),+) $b:block) => {
+        command!($fname($($arg),+) {
+            let res:Result<(), CetrizineError> = $b;
+            log_any_error!(res);
+        });
+    };
+}
+
+command_log!(send_raw(_context, message, args) {
+    let channel_id:u64 = args.single()?;
+    let message_to_send_content = args.rest();
+
+    ChannelId(channel_id).send_message(|m| m.content(message_to_send_content))?;
+    message.reply("Message sent")?;
+    Ok(())
+});
+
+command_log!(restart_shard(context) {
+    context.shard.shutdown_clean();
+    Ok(())
+});
+
+command_log!(recompile_and_run(context, message) {
+    warn!("Recompile command called");
+    let mut messages_to_show = Vec::new();
+    let analyzer_res = coral::Analyzer::with_args(coral::Checker::Build, &["--release"]);
+    let analyzer = match analyzer_res {
+        Ok(anal) => anal,
+        Err(why) => {
+            message.reply(&format!("Error running cargo: {:?}", why))?;
+            return Ok(())
+        }
+    };
+    message.reply("Starting compilation")?;
+    for entry in analyzer {
+        if let Some(cargo_msg) = entry.message {
+            if cargo_msg.is_warning() || cargo_msg.is_error() {
+                messages_to_show.push(cargo_msg);
+            }
+        }
+    }
+    if messages_to_show.len() > 0 {
+        let message_reports:Vec<String> = messages_to_show
+            .into_iter()
+            .map(|m| m.report(false, 80usize).unwrap_or(String::from("")))
+            .collect();
+
+        message.reply(&format!("Errors or warnings found, not running:\n\n```{}```", message_reports.join("\n\n")))?;
+    } else {
+        message.reply("About to restart into new code.")?;
+        {
+            let mut do_re_exec = DO_RE_EXEC.lock().unwrap();
+            *do_re_exec = Some(message.channel_id.0);
+        }
+        context.data.lock().get::<ShardManagerArcKey>().unwrap().lock().shutdown_all();
+    }
+    Ok(())
+});
+
+command_log!(horse(_context, message){
+    message.channel_id.send_files(vec!["996592.png"], |m| m)?;
+    Ok(())
+});
+
+command_log!(pony(_context, message){
+    message.channel_id.send_files(vec!["1955980.png"], |m| m)?;
+    Ok(())
+});
+
+command_log!(binary_de(context, message, args){
+    message.reply(&decode_binary(context, message, args.rest().to_string())?)?;
+    Ok(())
+});   
+
+command_log!(binary_en(context, message, args){
+    message.reply(&encode_binary(context, message, args.rest().to_string())?)?;
+    Ok(())
+});   
+
 command_log!(binary(context, message, args){
-    let res = decode_binary(context, message, args.rest().to_string())?;
+    //let res = decode_binary(context, message, args.rest().to_string())?;
+    let res = guess_binary(context, message, args)?;
     message.reply(&res)?;
     Ok(())
 });
+
+fn max(a:f32,b:f32)->f32{if a<b { b } else { a }}
+
+fn guess_binary(
+    context: &Context,
+    message: &Message,
+    args: Args,
+) -> Result<String, CetrizineError> {
+    let input = args.rest().to_string();
+    let mut binaryish_chars = 0f32;
+    let mut _indifferent_chars = 0f32;
+    let mut textual_chars = 0f32;
+    for c in input.chars() {
+        match c {
+            '0'|'1' => binaryish_chars += 1f32,
+            ' '|'\t'|'\n' => _indifferent_chars += 1f32,
+            _ => textual_chars += 1f32,
+        }
+    }
+    let nonindifferent_chars = binaryish_chars + textual_chars;
+    //let ratio = binaryish_chars/nonindifferent_chars;
+    let encode;
+    if nonindifferent_chars < 16f32 && (nonindifferent_chars as u32) % 8 != 0 {
+        encode = true;
+    } else if (binaryish_chars as u32) % 8 == 0 && textual_chars < 2f32 {
+        encode = false;
+    } else if nonindifferent_chars < 30f32 && (binaryish_chars/(binaryish_chars+max(textual_chars-2f32,0f32))) > 0.95 {
+        encode = false;
+    } else if (binaryish_chars/(binaryish_chars+max(textual_chars-4f32,0f32))) > 0.95 {
+        encode = false;
+    } else {
+        encode = true;
+    }
+    
+    if encode {
+        Ok(encode_binary(context, message, input)?)
+    } else {
+        Ok(decode_binary(context, message, input)?)
+    }
+}
+
+fn encode_binary(
+    _context: &Context,
+    _message: &Message,
+    arg: String,
+) -> Result<String, CetrizineError> {
+    let mut bit_string = String::with_capacity(arg.len()*9);
+    for byt in arg.as_bytes() {
+        for z in 0..=7 {
+            let i = 7-z;
+            if byt & (1 << i) != 0 {
+                bit_string.push('1');
+            } else {
+                bit_string.push('0');
+            }
+        }
+        bit_string.push(' ');
+    }
+
+    Ok(bit_string)
+}
 
 fn decode_binary(
     _context: &Context,
     _message: &Message,
     arg: String,
-) -> Result<String,CetrizineError> {
+) -> Result<String, CetrizineError> {
     let mut result_text = String::from("\n");
     let mut bits:Vec<bool> = Vec::new();
     let mut weird_char = None;
@@ -99,8 +271,10 @@ fn decode_binary(
     if bits.len() % 8 != 0 {
         result_text.push_str(&format!("WARN: Number of bits({}) is not a multiple of 8\n", bits.len()));
     }
+    info!("bits {:?}", &bits);
     let mut bytes:Vec<u8> = Vec::new();
     for chunk in bits.chunks_exact(8usize) {
+        info!("chunk: {:?}", &chunk);
         let byte:u8 =
             chunk[0].into_u8() << 7
             | chunk[1].into_u8() << 6
@@ -110,6 +284,7 @@ fn decode_binary(
             | chunk[5].into_u8() << 2
             | chunk[6].into_u8() << 1
             | chunk[7].into_u8();
+        info!("byte: {:?}", &byte);
         bytes.push(byte);
     }
     let bytes = bytes;
@@ -168,18 +343,25 @@ command_log!(help_info(context, message) {
 {0} {1}
 Commands:
 {2}ping - Play table tennis
-{2}setprefix - Change the prefix that bot will use. (shortcut: sp)
+{2}setprefix - Change the prefix that bot will use (shortcut: sp)
 {2}getprefix - Display the current prefix (shortcut: p)
+{2}binary - Convert between binary and text. Will try to \"guess\" \"\"intelligently\"\" what direction you're trying to go (shortcut: b)
+{2}binaryencode - Convert from text to binary (shortcut: be)
+{2}binarydecode - Convert from binary to text (shortcut: bd)
 {2}help - Display this message (also: info)
 
 Note: You can always perform commands by pinging this bot at the beginning, eg:
-<@{3}> command",
+<@{3}> command
+
+App icon based on <https://icons8.com/icon/114217/floppy-disk>
+
+This {0} has Super Pony Powers",
         some_kind_of_uppercase_first_letter(env!("CARGO_PKG_NAME")),
         env!("CARGO_PKG_VERSION"),
         inner_dynamic_prefix(&context, message)?.unwrap_or(String::from("")),
         USER_ID.load(Ordering::Relaxed),
     );
-    message.reply(&reply_text)?;
+    message.channel_id.send_message(|m| m.content(&reply_text))?;
     Ok(())
 });
 
@@ -197,7 +379,7 @@ command_log!(set_prefix(context, message, args) {
         Some(id) => id
     };
     let new_prefix:String = args.rest().into();
-    let conn = Arc::clone(context.data.lock().get::<PoolArcKey>().unwrap()).get()?;
+    let conn = context.get_pool_arc().get()?;
     if new_prefix.len() == 0 {
         conn.execute(
             "DELETE FROM guild_prefixes WHERE guild_id = $1",

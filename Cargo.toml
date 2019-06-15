@@ -1,6 +1,6 @@
 [package]
 name = "cetrizine"
-version = "1.0.1-wip"
+version = "1.0.3"
 authors = ["Shelvacu <shelvacu@gmail.com>"]
 edition = "2018"
 
@@ -19,6 +19,7 @@ log = "0.4"
 simplelog = "0.5"
 multi_log = "0.1"
 typemap = "0.3"
+lazy_static = "*"
 
 [dependencies.rusqlite]
 version = "~0.18.0"
@@ -33,3 +34,8 @@ version = "0.5.14-shel1"
 path = "../serenity/"
 default-features = true
 features = ["raw-ws-event"]
+
+[dependencies.coral]
+version = "^0.2"
+# git = "https://github.com/shelvacu/coral"
+path = "../coral"
