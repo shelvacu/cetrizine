@@ -1,3 +1,4 @@
+use std::convert::TryInto;
 use log::{Record, Level, Metadata};
 use chrono;
 use r2d2_postgres::r2d2;
@@ -52,14 +53,14 @@ impl log::Log for PostgresLogger {
             pg_insert_helper!(
                 the_conn, "log_entry",
                 logged_at_datetime => time,
-                logged_at_duration_secs => (duration.as_secs() as i64),
-                logged_at_duration_nanos => (duration.subsec_nanos() as i32),
+                logged_at_duration_secs => duration.as_secs().try_into().unwrap():i64,
+                logged_at_duration_nanos => duration.subsec_nanos().try_into().unwrap():i32,
                 session_rowid => session_id,
                 log_level => record.level().into_str(),
                 target => record.target(),
                 module_path => record.module_path(),
                 file => record.file(),
-                line => record.line().map(|v|v as i64),
+                line => record.line().map(|v|v.into():i64),
                 message_body => format!("{}",record.args()),
             )?;
             the_conn.batch_execute("SET synchronous_commit TO DEFAULT")?;

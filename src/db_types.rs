@@ -322,7 +322,7 @@ pub struct DbDiscordColour(pub i64);
 
 impl From<Colour> for DbDiscordColour {
     fn from(c: Colour) -> Self {
-        DbDiscordColour(c.0 as i64)
+        DbDiscordColour(i64::from(c.0))
     }
 }       
 

@@ -43,6 +43,7 @@ fn some_kind_of_uppercase_first_letter(s: &str) -> String {
 
 pub fn cetrizine_framework() -> StandardFramework {
     let owners = vec![
+        #[allow(clippy::unreadable_literal)] //This literal isn't meant to be read, it's an ID
         UserId(165858230327574528)
     ].into_iter().collect();
     StandardFramework::new()
@@ -142,10 +143,10 @@ command_log!(recompile_and_run(context, message) {
             }
         }
     }
-    if messages_to_show.len() > 0 {
+    if !messages_to_show.is_empty() {
         let message_reports:Vec<String> = messages_to_show
             .into_iter()
-            .map(|m| m.report(false, 80usize).unwrap_or(String::from("")))
+            .map(|m| m.report(false, 80usize).unwrap_or_else(String::new))
             .collect();
 
         message.reply(&format!("Errors or warnings found, not running:\n\n```{}```", message_reports.join("\n\n")))?;
@@ -210,11 +211,10 @@ fn guess_binary(
     let encode;
     if nonindifferent_chars < 16f32 && (nonindifferent_chars as u32) % 8 != 0 {
         encode = true;
-    } else if (binaryish_chars as u32) % 8 == 0 && textual_chars < 2f32 {
-        encode = false;
-    } else if nonindifferent_chars < 30f32 && (binaryish_chars/(binaryish_chars+max(textual_chars-2f32,0f32))) > 0.95 {
-        encode = false;
-    } else if (binaryish_chars/(binaryish_chars+max(textual_chars-4f32,0f32))) > 0.95 {
+    } else if ( (binaryish_chars as u32) % 8 == 0 && textual_chars < 2f32 ) ||
+        ( nonindifferent_chars < 30f32 && (binaryish_chars/(binaryish_chars+max(textual_chars-2f32,0f32))) > 0.95 ) ||
+        ( (binaryish_chars/(binaryish_chars+max(textual_chars-4f32,0f32))) > 0.95 )
+    {
         encode = false;
     } else {
         encode = true;
@@ -302,11 +302,11 @@ fn get_guild_prefix(
         "SELECT command_prefix FROM guild_prefixes WHERE guild_id = $1",
         &[&i64::from(guild_id)]
     )?;
-    if rows.len() == 0 {
-        return Ok(None);
+    if rows.is_empty() {
+        Ok(None)
     } else if rows.len() == 1 {
         let prefix:String = rows.get(0).get(0);
-        return Ok(Some(prefix));
+        Ok(Some(prefix))
     } else { unreachable!() }
 }
 
@@ -358,7 +358,7 @@ App icon based on <https://icons8.com/icon/114217/floppy-disk>
 This {0} has Super Pony Powers",
         some_kind_of_uppercase_first_letter(env!("CARGO_PKG_NAME")),
         env!("CARGO_PKG_VERSION"),
-        inner_dynamic_prefix(&context, message)?.unwrap_or(String::from("")),
+        inner_dynamic_prefix(&context, message)?.unwrap_or_else(String::new),
         USER_ID.load(Ordering::Relaxed),
     );
     message.channel_id.send_message(|m| m.content(&reply_text))?;
@@ -380,7 +380,7 @@ command_log!(set_prefix(context, message, args) {
     };
     let new_prefix:String = args.rest().into();
     let conn = context.get_pool_arc().get()?;
-    if new_prefix.len() == 0 {
+    if new_prefix.is_empty() {
         conn.execute(
             "DELETE FROM guild_prefixes WHERE guild_id = $1",
             &[&i64::from(guild_id)]

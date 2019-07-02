@@ -1,3 +1,5 @@
+use std::convert::TryInto;
+
 use super::pg;
 use super::pg::TlsMode;
 use super::sqlite;
@@ -33,7 +35,7 @@ pub fn filter_string(v: Vec<u8>) -> String {
 
 pub fn snowflake_arr(conn:&sqlite::Connection, i:i64) -> Vec<Snowflake> {
     conn.prepare_cached("SELECT id FROM id WHERE id_arr_rowid = ?1").unwrap().query_map(
-        &[&i as &sqlite::ToSql],
+        &[&i as &dyn sqlite::ToSql],
         |r| {
             let i:i64 = r.get::<_,String>(0).unwrap().parse().unwrap();
             Ok(Snowflake::from(i))
@@ -145,18 +147,19 @@ macro_rules! mass_insert_helper {
 
 fn increment_progress_to(txn: &pg::transaction::Transaction, check_progress:u64) {
     txn.batch_execute("UPDATE sqlite_migration_progress SET progress_counter = progress_counter + 1").unwrap();
-    let db_progress:i64 = txn.query("SELECT progress_counter FROM sqlite_migration_progress", &[] as &[&pg::types::ToSql]).unwrap().get(0).get(0);
+    let db_progress:i64 = txn.query("SELECT progress_counter FROM sqlite_migration_progress", &[] as &[&dyn pg::types::ToSql]).unwrap().get(0).get(0);
     assert_eq!(db_progress as u64, check_progress);
 }
 
-pub fn migrate_sqlite_to_postgres(pg_path: &str) -> () {
+#[allow(clippy::cognitive_complexity)]
+pub fn migrate_sqlite_to_postgres(pg_path: &str)  {
     println!("running any remaining sqlite migrations");
     sqlite_migrate();
     println!("finished sqlite migrations, writing postgres schema");
     let pg_conn = pg::Connection::connect(pg_path/*"postgres://shelvacu@%2Fvar%2Frun%2Fpostgresql:5434/detroit"*/, TlsMode::None).unwrap();
 
     let mp_table_exist_sql = "SELECT EXISTS (SELECT 1 FROM pg_tables WHERE schemaname = 'public' AND tablename = 'sqlite_migration_progress')";
-    let mp_table_exists:bool = pg_conn.query(mp_table_exist_sql, &[] as &[&pg::types::ToSql]).unwrap().get(0).get(0);
+    let mp_table_exists:bool = pg_conn.query(mp_table_exist_sql, &[] as &[&dyn pg::types::ToSql]).unwrap().get(0).get(0);
     
     if !mp_table_exists {
         pg_conn.batch_execute(include_str!("../postgres_init.sql")).unwrap();
@@ -171,7 +174,7 @@ pub fn migrate_sqlite_to_postgres(pg_path: &str) -> () {
 
     let pg_select_progress_stmt = pg_conn.prepare("SELECT progress_counter FROM sqlite_migration_progress").unwrap();
     let get_progress = || {
-        pg_select_progress_stmt.query(&[] as &[&pg::types::ToSql]).unwrap().get(0).get::<_,i64>(0) as u64
+        pg_select_progress_stmt.query(&[] as &[&dyn pg::types::ToSql]).unwrap().get(0).get::<_,i64>(0).try_into().expect("negative progress!"):u64
     };
 
     if get_progress() == 0 {
@@ -181,7 +184,7 @@ pub fn migrate_sqlite_to_postgres(pg_path: &str) -> () {
             {
                 let mut mentions:Vec<DiscordUser> = Vec::new();
                 let rowid = row.get_unwrap::<_,i64>("rowid");
-                let mut mrows = sqlite_mentions_stmt.query(&[&rowid as &sqlite::ToSql]).unwrap();
+                let mut mrows = sqlite_mentions_stmt.query(&[&rowid as &dyn sqlite::ToSql]).unwrap();
                 while let Some(mrow) = mrows.next().unwrap() {
                     let du = DiscordUser(DiscordUserInner{
                         discord_id: mrow.get_unwrap::<_,Snowflake>("id"),
@@ -222,7 +225,7 @@ pub fn migrate_sqlite_to_postgres(pg_path: &str) -> () {
                     channel_id => Snowflake::from(row.get_unwrap::<_,String>("channel_id")),
                     content => filter_string(row.get_unwrap("content_binary")),
                     edited_timestamp => row.get_unwrap::<_,Option<chrono::DateTime<chrono::Utc>>>("edited_timestamp"),
-                    guild_id => row.get_unwrap::<_,Option<String>>("guild_id").map(|s| Snowflake::from(s)),
+                    guild_id => row.get_unwrap::<_,Option<String>>("guild_id").map(Snowflake::from),
                     kind => row.get_unwrap::<_,String>("kind"),
                     member => the_partial_member,
                     mention_everyone => row.get_unwrap::<_,bool>("mention_everyone"),
@@ -232,7 +235,7 @@ pub fn migrate_sqlite_to_postgres(pg_path: &str) -> () {
                     pinned => row.get_unwrap::<_,bool>("pinned"),
                     timestamp => row.get_unwrap::<_,chrono::DateTime<chrono::Utc>>("timestamp"),
                     tts => row.get_unwrap::<_,bool>("tts"),
-                    webhook_id => row.get_unwrap::<_,Option<String>>("webhook_id").map(|s| Snowflake::from(s)),
+                    webhook_id => row.get_unwrap::<_,Option<String>>("webhook_id").map(Snowflake::from),
                     archive_recvd_at => row.get_unwrap::<_,chrono::DateTime<chrono::Utc>>("archive_recvd_at"),
                 ).unwrap();
             },
@@ -286,7 +289,7 @@ pub fn migrate_sqlite_to_postgres(pg_path: &str) -> () {
                     me => row.get_unwrap::<_,bool>("me"),
                     reaction_is_custom => row.get_unwrap::<_,bool>("reaction_is_custom"),
                     reaction_animated => row.get_unwrap::<_,Option<bool>>("reaction_animated"),
-                    reaction_id => row.get_unwrap::<_,Option<i64>>("reaction_id").map(|i| Snowflake::from(i)),
+                    reaction_id => row.get_unwrap::<_,Option<i64>>("reaction_id").map(Snowflake::from),
                     reaction_name => row.get_unwrap::<_,Option<String>>("reaction_name"),
                     reaction_string => row.get_unwrap::<_,Option<String>>("reaction_string"),
                 ).unwrap();
@@ -444,7 +447,7 @@ pub fn migrate_sqlite_to_postgres(pg_path: &str) -> () {
                     rowid => row.get_unwrap::<_,i64>("rowid"),
                     message_rowid => row.get_unwrap::<_,i64>("message_rowid"),
                     author => author,
-                    colour_u32 => row.get_unwrap::<_,Option<i64>>("colour_u32").map(|c| DiscordColour(c)),
+                    colour_u32 => row.get_unwrap::<_,Option<i64>>("colour_u32").map(DiscordColour),
                     description => row.get_unwrap::<_,Option<String>>("description"),
                     footer => footer,
                     image => image,
@@ -502,7 +505,7 @@ pub fn migrate_sqlite_to_postgres(pg_path: &str) -> () {
                 rowid => row.get_unwrap::<_,i64>("rowid"),
                 session_id => row.get_unwrap::<_,String>("session_id"),
                 shard => vec![row.get_unwrap::<_,Option<i64>>("shard_0"),row.get_unwrap::<_,Option<i64>>("shard_1")],
-                trace => row.get_unwrap::<_,String>("trace").split(",").map(String::from).collect::<Vec<String>>(),
+                trace => row.get_unwrap::<_,String>("trace").split(',').map(String::from).collect::<Vec<String>>(),
                 user_info => CurrentUser(CurrentUserInner{
                     inner_user: DiscordUser(DiscordUserInner{
                         discord_id: row.get_unwrap("user_id"),
@@ -531,7 +534,7 @@ pub fn migrate_sqlite_to_postgres(pg_path: &str) -> () {
             {
                 let mut recipients = Vec::new();
                 let rowid = row.get_unwrap::<_,i64>("rowid");
-                let mut rows = sqlite_group_user_stmt.query(&[&rowid as &sqlite::ToSql]).unwrap();
+                let mut rows = sqlite_group_user_stmt.query(&[&rowid as &dyn sqlite::ToSql]).unwrap();
                 while let Some(irow) = rows.next().unwrap() {
                     recipients.push(DiscordUser(DiscordUserInner{
                         discord_id: irow.get_unwrap("discord_id"),
@@ -600,7 +603,7 @@ pub fn migrate_sqlite_to_postgres(pg_path: &str) -> () {
                 application_id => row.get_unwrap::<_,Option<Snowflake>>("application_id"),
                 default_message_notification_level => row.get_unwrap::<_,String>("default_message_notification_level"), //I know the sqlite schema says this is an "int", but sqlite doesnt actually enforce types and text/strings were inserted into that column.
                 explicit_content_filter => row.get_unwrap::<_,String>("explicit_content_filter"),
-                features => row.get_unwrap::<_,String>("features").split(",").map(String::from).collect::<Vec<String>>(),
+                features => row.get_unwrap::<_,String>("features").split(',').map(String::from).collect::<Vec<String>>(),
                 icon => row.get_unwrap::<_,Option<String>>("icon"),
                 joined_at => row.get_unwrap::<_,Option<chrono::DateTime<chrono::Utc>>>("joined_at"),
                 large => row.get_unwrap::<_,bool>("large"),
@@ -894,10 +897,10 @@ pub fn make_sqlite_connection() -> Result<sqlite::Connection, sqlite::Error> {
     )?;//.expect("could not set db config to enable foreign keys");
     conn.set_prepared_statement_cache_capacity(30);//.expect("could not set cache capacity");
 
-    return Ok(conn);
+    Ok(conn)
 }
 
-pub fn sqlite_migrate() -> () {
+pub fn sqlite_migrate() {
     let mut conn = make_sqlite_connection().expect("could not establish database connection");
 
     conn.execute("CREATE TABLE IF NOT EXISTS message (

@@ -1,9 +1,10 @@
-#![feature(type_alias_enum_variants)]
 #![feature(trace_macros)]
 #![feature(nll)]
 #![feature(const_slice_len)]
 #![feature(option_flattening)]
+#![feature(type_ascription)]
 #![deny(unused_must_use)]
+#![allow(clippy::mutex_atomic)]
 
 #[macro_use]
 extern crate lazy_static;
@@ -67,6 +68,7 @@ use std::sync::{
         AtomicU64,
     },
 };
+use std::convert::{TryFrom,TryInto};
 use std::process;
 use std::os::unix::process::CommandExt;
 use std::ffi::OsString;
@@ -74,9 +76,12 @@ use std::ffi::OsString;
 macro_rules! pg_insert_helper {
     ($db:ident, $table_name:expr, $( $column_name:ident => $column_value:expr , )+ ) => {{
         let table_name = $table_name;
-        let values:&[&pg::types::ToSql] = &[
+        $(
+            let $column_name = $column_value;
+        )+
+        let values:&[&dyn pg::types::ToSql] = &[
             $(
-                &$column_value as &pg::types::ToSql,
+                &$column_name,
             )+
         ];
 
@@ -120,6 +125,7 @@ mod commands;
 
 use db_types::*;
 
+#[allow(clippy::unreadable_literal)]
 const DISCORD_MAX_SNOWFLAKE:u64 = 9223372036854775807;
 
 static SESSION_ID:AtomicI64 = AtomicI64::new(0);
@@ -127,6 +133,7 @@ static USER_ID:AtomicU64 = AtomicU64::new(0);
 lazy_static! {
     static ref DO_RE_EXEC:StdMutex<Option<u64>> = StdMutex::new(None);
 }
+//I really *do* want a bool in a mutex, since I want to send the reboot message exactly once and record that it's been sent, just in case discord sneezes and sends two Readys in quick succession. This *could* be implemented as two statics, an AtomicBool and a Mutex<()>, but the code using this doesn't need to be anywhere near performant.
 lazy_static! {
     static ref SENT_REBOOT_NOTIF:StdMutex<bool> = StdMutex::new(false);
 }
@@ -170,7 +177,7 @@ struct Handler{
 
 pub trait EnumIntoString : Sized {
     fn into_str(&self) -> &'static str;
-    fn from_str<'a>(input: &'a str) -> Option<Self>;
+    fn from_str(input: &str) -> Option<Self>;
 }
 
 pub trait FilterExt {
@@ -241,7 +248,7 @@ macro_rules! enum_stringify {
                     $( <$enum>::$var => stringify!($var), )+
                 }
             }
-            fn from_str<'a>(input: &'a str) -> Option<Self> {
+            fn from_str(input: &str) -> Option<Self> {
                 match input {
                     $( v if v == stringify!($var) => Some(<$enum>::$var), )+
                     _ => None,
@@ -273,7 +280,7 @@ impl EnumIntoString for serenity::OwnedMessage {
             Pong(_) => "Pong",
         }
     }
-    fn from_str<'a>(_input: &'a str) -> Option<Self> { None }
+    fn from_str(_input: &str) -> Option<Self> { None }
 }
 
 enum OwnedMessageData {
@@ -316,7 +323,7 @@ fn get_name(chan:&Channel) -> String {
     use serenity::model::channel::Channel::*;
     
     match chan {
-        Group(group) => group.read().name.clone().unwrap_or("".to_owned()),
+        Group(group) => group.read().name.clone().unwrap_or_else(String::new),
         Guild(guild) => guild.read().name.clone(),
         Private(private) => private.read().recipient.read().name.clone(),
         Category(cat) => cat.read().name.clone(),
@@ -336,7 +343,7 @@ fn get_last_message_id(chan:&Channel) -> Option<MessageId> {
 
 fn pg_sequence_currval<C: pg::GenericConnection>(c: &C, table: &str, column: &str) -> Result<i64, CetrizineError> {
     let res:i64 = c.query(&format!("SELECT currval(pg_get_serial_sequence('{}','{}'));",table,column),&[])?.get(0).get(0);
-    return Ok(res);
+    Ok(res)
 }
 
 #[derive(Debug)]
@@ -368,7 +375,7 @@ impl std::fmt::Display for CetrizineError {
 }
 
 impl std::error::Error for CetrizineError {
-    fn source(&self) -> Option<&(std::error::Error + 'static)> {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         use CetrizineErrorType::*;
         match &self.error_type {
             //Mutex(e)    => Some(e),
@@ -407,8 +414,8 @@ impl Handler {
         pg_insert_helper!(
             conn, "raw_message",
             recvd_at_datetime => ev.happened_at_chrono,
-            recvd_at_duration_secs => (recvd_duration.as_secs() as i64),
-            recvd_at_duration_nanos => (recvd_duration.subsec_nanos() as i32),
+            recvd_at_duration_secs => recvd_duration.as_secs().try_into().unwrap():i64,
+            recvd_at_duration_nanos => recvd_duration.subsec_nanos().try_into().unwrap():i32,
             session_rowid => self.session_id,
             kind => msg_type_str,
             content_text => msg_content_text,
@@ -417,8 +424,8 @@ impl Handler {
         trace!(
             "Inserted raw message {}, {}, {}, {}",
             &ev.happened_at_chrono,
-            &(recvd_duration.as_secs() as i64),
-            &(recvd_duration.subsec_nanos() as i32),
+            &(recvd_duration.as_secs().try_into().unwrap():i64),
+            &(recvd_duration.subsec_nanos().try_into().unwrap():i32),
             &self.session_id,
         );
         Ok(())
@@ -432,8 +439,8 @@ impl Handler {
         trace!(
             "About to insert guild create event {}, {}, {}, {}",
             &ev.happened_at_chrono,
-            &(recvd_duration.as_secs() as i64),
-            &(recvd_duration.subsec_nanos() as i32),
+            &(recvd_duration.as_secs().try_into().unwrap():i64),
+            &(recvd_duration.subsec_nanos().try_into().unwrap():i32),
             &self.session_id,
         );
 
@@ -441,8 +448,8 @@ impl Handler {
             conn, "guild_create_event",
             is_new => is_new,
             recvd_at_datetime => ev.happened_at_chrono,
-            recvd_at_duration_secs => (recvd_duration.as_secs() as i64),
-            recvd_at_duration_nanos => (recvd_duration.subsec_nanos() as i32),
+            recvd_at_duration_secs => recvd_duration.as_secs().try_into().unwrap():i64,
+            recvd_at_duration_nanos => recvd_duration.subsec_nanos().try_into().unwrap():i32,
             session_rowid => self.session_id,
         )?;
 
@@ -462,16 +469,13 @@ impl Handler {
     fn ready_result(&self, ctx: Context, ready: Ready) -> Result<(), CetrizineError> {
         USER_ID.store(ready.user.id.0, Ordering::Relaxed);
         info!("Ready event received. Connected as: {}", &ready.user.name);
-        match std::env::var("RE_EXECD") {
-            Ok(val) => {
-                let chan_id:u64 = val.parse().unwrap();
-                let mut sent_notif = SENT_REBOOT_NOTIF.lock().unwrap();
-                if !*sent_notif {
-                    ChannelId(chan_id).send_message(|m| m.content("Reboot finished"))?;
-                    *sent_notif = true;
-                }
+        if let Ok(val) = std::env::var("RE_EXECD") {
+            let chan_id:u64 = val.parse().unwrap();
+            let mut sent_notif = SENT_REBOOT_NOTIF.lock().unwrap();
+            if !*sent_notif {
+                ChannelId(chan_id).send_message(|m| m.content("Reboot finished"))?;
+                *sent_notif = true;
             }
-            Err(_) => (),
         }
         let conn = self.pool.get()?;
 
@@ -485,7 +489,7 @@ impl Handler {
         } else if !is_bot && ready.user.bot {
             // I really want to use like "uber warn" or something
             // It's not an error because we continue on just fine...
-            warn!("The given token appeared to be a user token but discord tells us a bot. Commands are currently disabled.");
+            warn!("The given token appeared to be a user token but discord tells us we're a bot. Commands are currently disabled.");
         }
         if !is_bot && !ready.user.bot {
             ctx.shard.set_status(OnlineStatus::Idle)
@@ -518,8 +522,8 @@ impl Handler {
             kind => msg.kind.into_str(),
             member => msg.member.clone().map(DbPartialMember::from),
             mention_everyone => msg.mention_everyone,
-            mention_roles => msg.mention_roles.clone().into_iter().map(|r| SmartHax(r)).collect::<Vec<_>>(),
-            mentions => msg.mentions.clone().into_iter().map(DbDiscordUser::from).collect::<Vec<_>>(),
+            mention_roles => msg.mention_roles.clone().into_iter().map(SmartHax).collect():Vec<_>,
+            mentions => msg.mentions.clone().into_iter().map(DbDiscordUser::from).collect():Vec<_>,
             nonce_debug => format!("{:?}",msg.nonce), //TODO: should probably file a bug and/or pull request with serenity about this one
             pinned => msg.pinned,
             timestamp => msg.timestamp,
@@ -535,12 +539,15 @@ impl Handler {
             pg_insert_helper!(
                 tx, "attachment",
                 message_rowid => message_rowid,
-                discord_id => DbSnowflake::from(attachment.id.parse::<i64>().expect("could not parse attachment discord id")), //Yes, attachment.id is a String when all the other .id's are a u64 wrapper
+                discord_id => DbSnowflake::from(
+                    //Yes, attachment.id is a String when all the other .id's are a u64 wrapper
+                    attachment.id.parse().expect("could not parse attachment discord id"):i64
+                ),
                 filename => attachment.filename.filter_null(),
-                height => attachment.height.map(|h| h as i64),
-                width => attachment.width.map(|w| w as i64),
+                height => attachment.height.map(|h| h.try_into().unwrap():i64),
+                width  => attachment.width .map(|w| w.try_into().unwrap():i64),
                 proxy_url => attachment.proxy_url.filter_null(),
-                size => (attachment.size as i64),
+                size => attachment.size.try_into().unwrap():i64,
                 url => attachment.url.filter_null(),
             )?;
         }
@@ -590,12 +597,12 @@ impl Handler {
             pg_insert_helper!(
                 tx, "reaction",
                 message_rowid => message_rowid,
-                count => (reaction.count as i64),
+                count => reaction.count.try_into().unwrap():i64,
                 me => reaction.me,
                 reaction_is_custom => is_custom,
                 
                 reaction_animated => animated,
-                reaction_id => SmartHax(id.clone()),
+                reaction_id => SmartHax(id),
                 reaction_name => name.filter_null(),
                 
                 reaction_string => string.filter_null(),
@@ -643,11 +650,18 @@ LIMIT 1;",
         )?;
         
         let mut maybe_res:Option<(i64,u64,Option<u64>,bool)> =
-            if rows.len() == 0 {
+            if rows.is_empty() {
                 None
             } else if rows.len() == 1 {
                 let r = rows.get(0);
-                Some((r.get(0),r.get::<_,i64>(1) as u64,r.get::<_,Option<i64>>(2).map(|i| i as u64),r.get(3)))
+                Some(
+                    (
+                        r.get(0),
+                        (r.get(1):i64).try_into().unwrap(),
+                        (r.get(2):Option<i64>).map(|i| i.try_into().unwrap()),
+                        r.get(3),
+                    )
+                )
             } else { panic!() };
         trace!("maybe_res is {:?}",maybe_res);
 
@@ -669,18 +683,25 @@ LIMIT 1;",
 ) AND channel_id = $3 AND rowid != $4
 ORDER BY start_message_id ASC LIMIT 1;",
                 &[
-                    &(get_before as i64),
-                    &(before_message_id.map(|u| u as i64)),
+                    &(get_before.try_into().unwrap():i64),
+                    &(before_message_id.map(|u| u.try_into().unwrap():i64)),
                     &(chan.id().get_snowflake_i64()),
                     &res.0
                 ]
             )?;
             maybe_res =
-                if rows.len() == 0 {
+                if rows.is_empty() {
                     None
                 } else if rows.len() == 1 {
                     let r = rows.get(0);
-                    Some((r.get(0),r.get::<_,i64>(1) as u64,r.get::<_,Option<i64>>(2).map(|i| i as u64),r.get(3)))
+                    Some(
+                        (
+                            r.get(0),
+                            (r.get(1):i64).try_into().unwrap(),
+                            (r.get(2):Option<i64>).map(|i| i.try_into().unwrap()),
+                            r.get(3),
+                        )
+                    )
                 } else { panic!("Query ending in LIMIT 1 did not return 0 or 1 rows.") };
             trace!("maybe_res again is {:?}",maybe_res);
         }
@@ -691,12 +712,12 @@ ORDER BY start_message_id ASC LIMIT 1;",
         let rows = conn.query(
             "SELECT start_message_id FROM message_archive_gets WHERE end_message_id < $1 AND channel_id = $2 ORDER BY start_message_id DESC LIMIT 1;",
             &[
-                &(get_before as i64),
+                &(get_before.try_into().unwrap():i64),
                 &(chan.id().get_snowflake_i64())
             ],
         )?;
         let gap_end =
-            if rows.len() == 0 {
+            if rows.is_empty() {
                 0i64
             } else if rows.len() == 1 {
                 rows.get(0).get(0)
@@ -705,7 +726,7 @@ ORDER BY start_message_id ASC LIMIT 1;",
         trace!("gap_end is {:?}",gap_end);
         let mut earliest_message_recvd = get_before;
 
-        while earliest_message_recvd > (gap_end as u64) {
+        while earliest_message_recvd > (gap_end.try_into().unwrap():u64) {
             let asking_for = 100u8;
             
             let mut msgs;
@@ -734,7 +755,7 @@ ORDER BY start_message_id ASC LIMIT 1;",
                 trace!("Archiving Message id {:?}", msg.id);
                 Self::archive_message(&tx, msg, recvd_at)?;
             }
-            if msgs.len() == 0 { break }
+            if msgs.is_empty() { break }
             let first_msg = msgs.first().expect("im a bad");
             let last_msg  = msgs.last().expect("im a bad");
 
@@ -745,21 +766,21 @@ ORDER BY start_message_id ASC LIMIT 1;",
                     &(first_msg.id.get_snowflake_i64()),
                     &(chan.id().get_snowflake_i64())
                 ],
-            )?.get(0).get::<_,i64>(0) > 0;
+            )?.get(0).get(0):i64 > 0;
             let already_archived_end:bool = tx.query(
                 "SELECT COUNT(*) FROM message_archive_gets WHERE (start_message_id >= $1 AND $1 >= end_message_id) AND channel_id = $2 AND rowid > 193737",
                 &[
                     &(last_msg.id.get_snowflake_i64()),
                     &(chan.id().get_snowflake_i64())
                 ],
-            )?.get(0).get::<_,i64>(0) > 0;
+            )?.get(0).get(0):i64 > 0;
             let already_archived_around:bool = tx.query(
                 "SELECT COUNT(*) FROM message_archive_gets WHERE (start_message_id >= $1 AND $1 >= end_message_id) AND channel_id = $2 AND rowid > 193737",
                 &[
                     &(last_msg_id.get_snowflake_i64()),
                     &(chan.id().get_snowflake_i64())
                 ],
-            )?.get(0).get::<_,i64>(0) > 0;
+            )?.get(0).get(0):i64 > 0;
             let we_have_archived_this_before = already_archived_start && already_archived_end && (!around || already_archived_around);
             if we_have_archived_this_before {
                 error!(
@@ -784,8 +805,8 @@ ORDER BY start_message_id ASC LIMIT 1;",
                 before_message_id => if around { None } else { Some(DbSnowflake::from(earliest_message_recvd)) },
                 start_message_id => SmartHax(first_msg.id),
                 end_message_id => SmartHax(last_msg.id),
-                message_count_requested => asking_for as i64,
-                message_count_received => msgs.len() as i64,
+                message_count_requested => i64::from(asking_for),
+                message_count_received => i64::try_from(msgs.len()).expect("That's a lot of messages"),
             )?;
             tx.commit()?;
             got_messages = true;
@@ -802,7 +823,7 @@ ORDER BY start_message_id ASC LIMIT 1;",
         
         if got_messages {
             trace!("recursing!");
-            return Self::grab_channel_archive(conn, chan, guild_name);
+            Self::grab_channel_archive(conn, chan, guild_name)
         } else {
             Ok(())
         }
@@ -825,15 +846,15 @@ ORDER BY start_message_id ASC LIMIT 1;",
             guild_create_event_rowid => parent_rowid.as_create_event(),
             discord_id => SmartHax(guild.id), 
             afk_channel_id => SmartHax(guild.afk_channel_id), 
-            afk_timeout => (guild.afk_timeout as i64), 
+            afk_timeout => guild.afk_timeout.try_into().unwrap():i64, 
             application_id => SmartHax(guild.application_id), 
             default_message_notification_level => guild.default_message_notifications.into_str(),
             explicit_content_filter => guild.explicit_content_filter.into_str(),
-            features => guild.features.clone().into_iter().map(|s| s.filter_null()).collect::<Vec<_>>(),
+            features => guild.features.clone().into_iter().map(|s| s.filter_null()).collect():Vec<_>,
             icon => guild.icon.filter_null(),
             joined_at => guild.joined_at,
             large => guild.large,
-            member_count => (guild.member_count as i64),
+            member_count => guild.member_count.try_into().unwrap():i64,
             mfa_level => guild.mfa_level.into_str(),
             name => guild.name.filter_null(),
             owner_id => SmartHax(guild.owner_id),
@@ -849,7 +870,7 @@ ORDER BY start_message_id ASC LIMIT 1;",
         let mut guild_channels = Vec::<(ChannelId,i64)>::new();
 
         //channels
-        for (_id, chan_a_lock) in &guild.channels {
+        for chan_a_lock in guild.channels.values() {
             let chan = chan_a_lock.read();
 
             pg_insert_helper!(
@@ -857,7 +878,7 @@ ORDER BY start_message_id ASC LIMIT 1;",
                 discord_id => SmartHax(chan.id),
                 guild_rowid => guild_rowid,
                 guild_id => SmartHax(chan.guild_id),
-                bitrate => chan.bitrate.map(|b| b as i64),
+                bitrate => chan.bitrate.map(|b| b.try_into().unwrap():i64),
                 category_id => SmartHax(chan.category_id),
                 kind => chan.kind.into_str(),
                 last_message_id => SmartHax(chan.last_message_id),
@@ -865,13 +886,13 @@ ORDER BY start_message_id ASC LIMIT 1;",
                 name => chan.name.filter_null(),
                 position => chan.position,
                 topic => chan.topic.filter_null(),
-                user_limit => chan.user_limit.map(|u| u as i64),
+                user_limit => chan.user_limit.map(|u| u.try_into().unwrap():i64),
                 nsfw => chan.nsfw,
             )?;
 
             let chan_rowid = pg_sequence_currval(&tx, "guild_channel", "rowid")?;
 
-            guild_channels.push((chan.id.clone(), chan_rowid));
+            guild_channels.push((chan.id, chan_rowid));
 
             for overwrite in &chan.permission_overwrites {
                 use serenity::model::channel::PermissionOverwriteType::*;
@@ -892,7 +913,7 @@ ORDER BY start_message_id ASC LIMIT 1;",
         }
 
         //emojis
-        for (_, emoji) in &guild.emojis {
+        for emoji in guild.emojis.values() {
             pg_insert_helper!(
                 tx, "emoji",
                 discord_id => SmartHax(emoji.id),
@@ -901,12 +922,12 @@ ORDER BY start_message_id ASC LIMIT 1;",
                 name => emoji.name.filter_null(),
                 managed => emoji.managed,
                 require_colons => emoji.require_colons,
-                roles => emoji.roles.clone().into_iter().map(DbSnowflake::from).collect::<Vec<_>>(),
+                roles => emoji.roles.clone().into_iter().map(DbSnowflake::from).collect():Vec<_>,
             )?;
         }
 
         //members
-        for (_, member) in &guild.members {
+        for member in guild.members.values() {
             let user = member.user.read();
 
             pg_insert_helper!(
@@ -917,20 +938,20 @@ ORDER BY start_message_id ASC LIMIT 1;",
                 joined_at => member.joined_at,
                 mute => member.mute,
                 nick => member.nick.filter_null(),
-                roles => member.roles.clone().into_iter().map(DbSnowflake::from).collect::<Vec<_>>(),
+                roles => member.roles.clone().into_iter().map(DbSnowflake::from).collect():Vec<_>,
                 user_info => DbDiscordUser::from(user.clone()),
             )?;
 
         }
 
         //presences
-        for (_, presence) in &guild.presences {
+        for presence in guild.presences.values() {
             pg_insert_helper!(
                 tx, "user_presence",
-                ready_rowid => (None as Option<i64>),
+                ready_rowid => None:Option<i64>,
                 guild_rowid => guild_rowid, //guild_rowid
                 game => presence.game.clone().map(DbUserPresenceGame::from),
-                last_modified => presence.last_modified.map(|v| v as i64),
+                last_modified => presence.last_modified.map(|v| v.try_into().unwrap():i64),
                 nick => presence.nick.filter_null(),
                 status => presence.status.into_str(),
                 user_id => SmartHax(presence.user_id),
@@ -938,7 +959,7 @@ ORDER BY start_message_id ASC LIMIT 1;",
         }
 
         //roles
-        for (_, role) in &guild.roles {
+        for role in guild.roles.values() {
             pg_insert_helper!(
                 tx, "guild_role",
                 discord_id => SmartHax(role.id), 
@@ -954,7 +975,7 @@ ORDER BY start_message_id ASC LIMIT 1;",
         }
 
         //voice_states
-        for (_, voice_state) in &guild.voice_states {
+        for voice_state in guild.voice_states.values() {
             pg_insert_helper!(
                 tx, "voice_state",
                 guild_rowid => guild_rowid,
@@ -1014,22 +1035,25 @@ ORDER BY start_message_id ASC LIMIT 1;",
         pg_insert_helper!(
             tx, "ready",
             session_id => rdy.session_id.filter_null(),
-            shard => rdy.shard.clone().map(|a| vec![a[0] as i64, a[1] as i64]),
-            trace => rdy.trace.into_iter().map(|s| s.filter_null()).collect::<Vec<_>>(),
+            shard => rdy.shard.map(|a| vec![
+                a[0].try_into().unwrap():i64,
+                a[1].try_into().unwrap():i64,
+            ]),
+            trace => rdy.trace.into_iter().map(|s| s.filter_null()).collect():Vec<_>,
             user_info => DbCurrentUser::from(rdy.user.clone()),
-            version => (rdy.version as i64),
+            version => rdy.version.try_into().unwrap():i64,
         )?;
 
         let ready_rowid = pg_sequence_currval(&tx, "ready", "rowid")?;
 
         //presences
-        for (_,presence) in &rdy.presences {            
+        for presence in rdy.presences.values() {            
             pg_insert_helper!(
                 tx, "user_presence",
                 ready_rowid => ready_rowid,
-                guild_rowid => (None as Option<i64>),
+                guild_rowid => None:Option<i64>,
                 game => presence.game.clone().map(DbUserPresenceGame::from),
-                last_modified => presence.last_modified.map(|v| v as i64),
+                last_modified => presence.last_modified.map(|v| v.try_into().unwrap():i64),
                 nick => presence.nick.filter_null(),
                 status => presence.status.into_str(),
                 user_id => SmartHax(presence.user_id),
@@ -1054,7 +1078,7 @@ ORDER BY start_message_id ASC LIMIT 1;",
                         last_pin_timestamp => group.last_pin_timestamp,
                         name => group.name.filter_null(),
                         owner_id => SmartHax(group.owner_id),
-                        recipients => group.recipients.iter().map(|rl| DbDiscordUser::from(rl.1.read().clone())).collect::<Vec<_>>(),
+                        recipients => group.recipients.iter().map(|rl| DbDiscordUser::from(rl.1.read().clone())).collect():Vec<_>,
                     )?;
 
                     private_channels_to_archive.push(group.channel_id);
@@ -1346,10 +1370,8 @@ DB migration version: {}",
             if migrate_only || init_db || !no_auto_migrate {
                 migrations::do_postgres_migrate(&*setup_conn);
                 if migrate_only { std::process::exit(0); }
-            } else {
-                if !migrations::migration_is_current(&*setup_conn) {
-                    panic!("Migration version mismatch, no auto migrate, aborting.");
-                }
+            } else if !migrations::migration_is_current(&*setup_conn) {
+                panic!("Migration version mismatch, no auto migrate, aborting.");
             }
 
             pg_insert_helper!(
@@ -1400,14 +1422,12 @@ DB migration version: {}",
             }
         });
 
-        let is_bot;
-        if discord_token.starts_with("Bot ") {
+        let is_bot = discord_token.starts_with("Bot ");
+        if is_bot {
             info!("Detected bot token, running with commands enabled");
             client.with_framework(commands::cetrizine_framework());
-            is_bot = true;
         }else{
             info!("Found non-bot token, will not respond to commands");
-            is_bot = false;
         }
 
         {
@@ -1423,7 +1443,7 @@ DB migration version: {}",
 
     //If we get to this point, that means the client shut down gracefully.
 
-    let do_re_exec = DO_RE_EXEC.lock().unwrap().clone();
+    let do_re_exec = *DO_RE_EXEC.lock().unwrap();
     if let Some(chan_id) = do_re_exec {
         let args:Vec<OsString> = std::env::args_os().collect();
         let chan_str = format!("{}", chan_id);
