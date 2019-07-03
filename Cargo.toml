@@ -20,6 +20,7 @@ simplelog = "0.5"
 multi_log = "0.1"
 typemap = "0.3"
 lazy_static = "*"
+evmap = "^6.0"
 
 [dependencies.rusqlite]
 version = "~0.18.0"
@@ -31,11 +32,10 @@ features = ["with-serde_json","with-time","with-chrono"]
 
 [dependencies.serenity]
 version = "0.5.14-shel3"
-path = "../serenity/"
+path = "./serenity"
 default-features = true
 features = ["raw-ws-event"]
 
 [dependencies.coral]
 version = "^0.2"
-# git = "https://github.com/shelvacu/coral"
-path = "../coral"
+path = "./coral"

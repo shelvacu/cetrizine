@@ -1,0 +1,6 @@
+[submodule "serenity"]
+	path = serenity
+	url = ../serenity
+[submodule "coral"]
+	path = coral
+	url = ../coral

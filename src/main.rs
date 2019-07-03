@@ -41,6 +41,9 @@ extern crate time;
 //This crate allows calling cargo and getting structured output
 extern crate coral;
 
+//A map for per-channel mutexes. Somewhat overkill for what I need, but no other crate can have *many* readers at a time.
+extern crate evmap;
+
 use backtrace::Backtrace;
 
 use r2d2_postgres::r2d2;
@@ -345,6 +348,27 @@ fn pg_sequence_currval<C: pg::GenericConnection>(c: &C, table: &str, column: &st
     Ok(res)
 }
 
+fn make_synthetic_mag<C: pg::GenericConnection>(c: &C, session_id: i64, channel_id: i64) -> Result<(), CetrizineError> {
+    c.execute("INSERT INTO message_archive_gets (session_id, channel_id, synthetic, finished) VALUES ($1, $2, true, false) ON CONFLICT DO NOTHING;", &[&session_id, &DbSnowflake::from(channel_id)])?;
+    Ok(())
+}
+
+fn set_after_message_id<C: pg::GenericConnection>(c: &C, session_id: i64, channel_id: ChannelId, maybe_last_message_id: Option<MessageId>) -> Result<(), CetrizineError> {
+    make_synthetic_mag(c, session_id, channel_id.get_snowflake_i64())?;
+    if let Some(last_message_id) = maybe_last_message_id {
+        c.execute(
+            "UPDATE message_archive_gets SET after_message_id = $1 WHERE session_id = $2 AND channel_id = $3 AND synthetic = true AND after_message_id IS NULL",
+            &[
+                &DbSnowflake::from(last_message_id),
+                &session_id,
+                &channel_id.get_snowflake_i64(),
+            ],
+        )?;
+    }
+    Ok(())
+}
+
+
 #[derive(Debug)]
 pub struct CetrizineError{
     pub error_type: CetrizineErrorType,
@@ -453,6 +477,7 @@ impl Handler {
         )?;
 
         let guild_create_event_rowid = pg_sequence_currval(&*conn, "guild_create_event", "rowid")?;
+        let session_id_copy = self.session_id;
         std::thread::spawn(move || {
             log_any_error!(Self::archive_guild(
                 &*conn,
@@ -460,6 +485,7 @@ impl Handler {
                 &guild,
                 GuildParentId::CreateEvent(guild_create_event_rowid),
                 &channel_archiver_sender,
+                session_id_copy,
             ));
         });
         Ok(())
@@ -503,8 +529,17 @@ impl Handler {
         }
 
         let channel_archiver_sender = self.archival_queue.lock().unwrap().clone();
+        let session_id_copy = self.session_id;
         std::thread::spawn(move || {
-            log_any_error!(Self::grab_full_archive(&*conn, ctx, ready, channel_archiver_sender));
+            log_any_error!(
+                Self::grab_full_archive(
+                    &*conn,
+                    ctx,
+                    ready,
+                    channel_archiver_sender,
+                    session_id_copy,
+                )
+            );
         });
         Ok(())
     }
@@ -640,6 +675,8 @@ WHERE
   ) 
   AND 
   channel_id = $2
+  AND
+  finished = true
 ORDER BY end_message_id ASC
 LIMIT 1;",
             &[
@@ -658,32 +695,32 @@ LIMIT 1;",
                         r.get(0),
                         (r.get(1):i64).try_into().unwrap(),
                         (r.get(2):Option<i64>).map(|i| i.try_into().unwrap()),
-                        r.get(3),
+                        (r.get(3):Option<bool>).unwrap_or(false),
                     )
                 )
             } else { panic!() };
         trace!("maybe_res is {:?}",maybe_res);
 
         let mut get_before = DISCORD_MAX_SNOWFLAKE;
-        let mut before_message_id:Option<u64>;
+        let mut after_message_id:Option<u64>;
         
         while let Some(res) = maybe_res {
             get_before = res.1;
-            before_message_id = res.2;
+            after_message_id = res.2;
             if res.3 {
                 return Ok(());
             }
-            trace!("selecting maybe_res again get_before {} before_message_id {:?} res.0 {}",get_before,before_message_id,res.0);
+            trace!("selecting maybe_res again get_before {} after_message_id {:?} res.0 {}",get_before,after_message_id,res.0);
             let rows = conn.query(
                 "SELECT rowid,end_message_id,after_message_id,(message_count_received < message_count_requested) FROM message_archive_gets WHERE (
   ( start_message_id >= $1 AND $1 > end_message_id ) OR
   before_message_id = $1 OR
-  ($2::int8 IS NOT NULL AND end_message_id = $2::int8)
-) AND channel_id = $3 AND rowid != $4
+  ($2::int8 IS NOT NULL AND start_message_id = $2::int8)
+) AND channel_id = $3 AND rowid != $4 AND finished = true
 ORDER BY start_message_id ASC LIMIT 1;",
                 &[
                     &(get_before.try_into().unwrap():i64),
-                    &(before_message_id.map(|u| u.try_into().unwrap():i64)),
+                    &(after_message_id.map(|u| u.try_into().unwrap():i64)),
                     &(chan.id().get_snowflake_i64()),
                     &res.0
                 ]
@@ -698,7 +735,7 @@ ORDER BY start_message_id ASC LIMIT 1;",
                             r.get(0),
                             (r.get(1):i64).try_into().unwrap(),
                             (r.get(2):Option<i64>).map(|i| i.try_into().unwrap()),
-                            r.get(3),
+                            (r.get(3):Option<bool>).unwrap_or(false),
                         )
                     )
                 } else { panic!("Query ending in LIMIT 1 did not return 0 or 1 rows.") };
@@ -709,7 +746,7 @@ ORDER BY start_message_id ASC LIMIT 1;",
 
         trace!("selecting gap_end where end < {} and chan = {}",get_before,chan.id());
         let rows = conn.query(
-            "SELECT start_message_id FROM message_archive_gets WHERE end_message_id < $1 AND channel_id = $2 ORDER BY start_message_id DESC LIMIT 1;",
+            "SELECT start_message_id FROM message_archive_gets WHERE end_message_id < $1 AND channel_id = $2 AND finished = true ORDER BY start_message_id DESC LIMIT 1;",
             &[
                 &(get_before.try_into().unwrap():i64),
                 &(chan.id().get_snowflake_i64())
@@ -760,21 +797,21 @@ ORDER BY start_message_id ASC LIMIT 1;",
 
             //DEBUG START
             let already_archived_start:bool = tx.query(
-                "SELECT COUNT(*) FROM message_archive_gets WHERE (start_message_id >= $1 AND $1 >= end_message_id) AND channel_id = $2 AND rowid > 193737",
+                "SELECT COUNT(*) FROM message_archive_gets WHERE (start_message_id >= $1 AND $1 >= end_message_id) AND channel_id = $2 AND rowid > 193737 AND finished = true",
                 &[
                     &(first_msg.id.get_snowflake_i64()),
                     &(chan.id().get_snowflake_i64())
                 ],
             )?.get(0).get(0):i64 > 0;
             let already_archived_end:bool = tx.query(
-                "SELECT COUNT(*) FROM message_archive_gets WHERE (start_message_id >= $1 AND $1 >= end_message_id) AND channel_id = $2 AND rowid > 193737",
+                "SELECT COUNT(*) FROM message_archive_gets WHERE (start_message_id >= $1 AND $1 >= end_message_id) AND channel_id = $2 AND rowid > 193737 AND finished = true",
                 &[
                     &(last_msg.id.get_snowflake_i64()),
                     &(chan.id().get_snowflake_i64())
                 ],
             )?.get(0).get(0):i64 > 0;
             let already_archived_around:bool = tx.query(
-                "SELECT COUNT(*) FROM message_archive_gets WHERE (start_message_id >= $1 AND $1 >= end_message_id) AND channel_id = $2 AND rowid > 193737",
+                "SELECT COUNT(*) FROM message_archive_gets WHERE (start_message_id >= $1 AND $1 >= end_message_id) AND channel_id = $2 AND rowid > 193737 AND finished = true",
                 &[
                     &(last_msg_id.get_snowflake_i64()),
                     &(chan.id().get_snowflake_i64())
@@ -833,7 +870,8 @@ ORDER BY start_message_id ASC LIMIT 1;",
         ctx: &Context,
         guild: &Guild,
         parent_rowid: GuildParentId,
-        channel_archiver_sender: &Sender<(Channel, String)>
+        channel_archiver_sender: &Sender<(Channel, String)>,
+        session_id: i64,
     ) -> Result<(), CetrizineError> {
         info!("ARCHIVING GUILD {}", &guild.name);
         let raw_event = ctx.raw_event.as_ref().unwrap();
@@ -891,6 +929,7 @@ ORDER BY start_message_id ASC LIMIT 1;",
 
             let chan_rowid = pg_sequence_currval(&tx, "guild_channel", "rowid")?;
 
+            set_after_message_id(&tx, session_id, chan.id, chan.last_message_id)?;
             guild_channels.push((chan.id, chan_rowid));
 
             for overwrite in &chan.permission_overwrites {
@@ -1027,7 +1066,8 @@ ORDER BY start_message_id ASC LIMIT 1;",
         conn: &C,
         ctx: Context,
         rdy: Ready,
-        channel_archiver_sender: Sender<(Channel, String)>
+        channel_archiver_sender: Sender<(Channel, String)>,
+        session_id: i64,
     ) -> Result<(), CetrizineError> {
         let tx = conn.transaction()?;
 
@@ -1065,7 +1105,7 @@ ORDER BY start_message_id ASC LIMIT 1;",
         for (id, channel) in &rdy.private_channels {
             use serenity::model::channel::Channel::*;
             match channel {
-                Guild(_) | Category(_) => panic!("Discord sent a Guild channel in the private channels list, id {}", id),
+                Guild(_) | Category(_) => warn!("Discord sent a Guild channel in the private channels list, id {}", id),
                 Group(group_lock) => {
                     let group = group_lock.read();
                     pg_insert_helper!(
@@ -1081,6 +1121,7 @@ ORDER BY start_message_id ASC LIMIT 1;",
                     )?;
 
                     private_channels_to_archive.push(group.channel_id);
+                    set_after_message_id(&tx, session_id, group.channel_id, group.last_message_id)?;
                 },
                 Private(chan_lock) => {
                     let chan = chan_lock.read();
@@ -1095,6 +1136,7 @@ ORDER BY start_message_id ASC LIMIT 1;",
                         recipient => DbDiscordUser::from(user.clone()),
                     )?;
                     private_channels_to_archive.push(chan.id);
+                    set_after_message_id(&tx, session_id, chan.id, chan.last_message_id)?;
                 },
             }
         }
@@ -1110,13 +1152,13 @@ ORDER BY start_message_id ASC LIMIT 1;",
                     continue;
                 }
             };
-
             Self::archive_guild(
                 conn,
                 &ctx,
                 guild,
                 GuildParentId::Ready(ready_rowid),
-                &channel_archiver_sender
+                &channel_archiver_sender,
+                session_id,
             )?;
         }
 
@@ -1156,6 +1198,32 @@ ORDER BY start_message_id ASC LIMIT 1;",
 
         let tx = conn.transaction()?;
         Self::archive_message(&tx, &msg, handler_start)?;
+        make_synthetic_mag(&tx, self.session_id, msg.channel_id.get_snowflake_i64())?;
+        tx.execute(
+            "UPDATE message_archive_gets SET start_message_id = $1 WHERE session_id = $2 and channel_id = $3 AND synthetic = true AND (start_message_id IS NULL OR start_message_id < $4)",
+            &[
+                &DbSnowflake::from(msg.id),
+                &self.session_id,
+                &msg.channel_id.get_snowflake_i64(),
+                &msg.id.get_snowflake_i64(),
+            ],
+        )?;
+        tx.execute(
+            "UPDATE message_archive_gets SET end_message_id = $1 WHERE session_id = $2 AND channel_id = $3 AND synthetic = true AND (end_message_id IS NULL OR end_message_id > $4)",
+            &[
+                &DbSnowflake::from(msg.id),
+                &self.session_id,
+                &msg.channel_id.get_snowflake_i64(),
+                &msg.id.get_snowflake_i64(),
+            ],
+        )?;
+        tx.execute(
+            "UPDATE message_archive_gets SET finished = true WHERE session_id = $1 AND channel_id = $2 AND synthetic = true",
+            &[
+                &self.session_id,
+                &msg.channel_id.get_snowflake_i64(),
+            ],
+        )?;
         tx.commit()?;
 
         println!("{}\n{}\n{}\n{}\n{}\n", guild_str, chan_info, date_info, user_info, mesg_info);

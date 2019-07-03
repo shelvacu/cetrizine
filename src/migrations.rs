@@ -1,3 +1,4 @@
+use std::convert::TryInto;
 use super::pg;
 
 enum MigrationSpec {
@@ -19,6 +20,7 @@ const MIGRATIONS:&[MigrationSpec] = &[
     Normal(include_str!("migrations/8to9.sql")), //8
     Normal(include_str!("migrations/9to10.sql")), //9
     Normal(include_str!("migrations/10to11.sql")), //10
+    Normal(include_str!("migrations/11to12-previous-message.sql")), //11
 ];
 
 pub const CURRENT_MIGRATION_VERSION:usize = MIGRATIONS.len();
@@ -36,7 +38,7 @@ pub fn migration_is_current<C: pg::GenericConnection>(conn: &C) -> bool {
 
 pub fn do_postgres_migrate<C: pg::GenericConnection>(conn: &C) {
     loop {
-        let mv = get_migration_version(conn) as usize;
+        let mv = get_migration_version(conn).try_into().unwrap():usize;
         if mv > CURRENT_MIGRATION_VERSION {
             panic!("Database is newer than {} binary! Max expected migration version: {} Found migration version: {}",env!("CARGO_PKG_NAME"), CURRENT_MIGRATION_VERSION, mv);
         }
@@ -50,8 +52,8 @@ pub fn do_postgres_migrate<C: pg::GenericConnection>(conn: &C) {
                 let updated = tx.execute(
                     "UPDATE migration_version SET version = $1 WHERE version = $2",
                     &[
-                        &((mv+1) as i64),
-                        &(mv as i64)
+                        &((mv+1).try_into().unwrap():i64),
+                        &(mv.try_into().unwrap():i64),
                     ]
                 ).unwrap();
                 if updated != 1 {
