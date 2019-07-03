@@ -74,7 +74,7 @@ use std::os::unix::process::CommandExt;
 use std::ffi::OsString;
 
 macro_rules! pg_insert_helper {
-    ($db:ident, $table_name:expr, $( $column_name:ident => $column_value:expr , )+ ) => {{
+    ( $db:ident, $table_name:expr, $( $column_name:ident => $column_value:expr , )+ ) => {{
         let table_name = $table_name;
         $(
             let $column_name = $column_value;
@@ -169,7 +169,6 @@ impl ContextExt for Context {
 }    
 
 struct Handler{
-    pool: Arc<r2d2::Pool<r2d2_postgres::PostgresConnectionManager>>,
     beginning_of_time: std::time::Instant,
     session_id: i64,
     archival_queue: StdMutex<Sender<(Channel, String)>>,
@@ -258,7 +257,7 @@ macro_rules! enum_stringify {
     };
 }
 
-enum_stringify!{ serenity::model::channel::MessageType => Regular, GroupRecipientAddition, GroupRecipientRemoval, GroupCallCreation, GroupNameUpdate, GroupIconUpdate, PinsAdd, MemberJoin }
+enum_stringify!{ serenity::model::channel::MessageType => Regular, GroupRecipientAddition, GroupRecipientRemoval, GroupCallCreation, GroupNameUpdate, GroupIconUpdate, PinsAdd, MemberJoin, UserPremiumGuildSubscription, UserPremiumGuildSubscriptionTier1, UserPremiumGuildSubscriptionTier2, UserPremiumGuildSubscriptionTier3 }
 enum_stringify!{ serenity::model::guild::DefaultMessageNotificationLevel => All, Mentions }
 enum_stringify!{ serenity::model::guild::ExplicitContentFilter => None, WithoutRole, All }
 enum_stringify!{ serenity::model::guild::MfaLevel => None, Elevated }
@@ -406,8 +405,8 @@ impl From<r2d2::Error> for CetrizineError {
 
 
 impl Handler {
-    fn archive_raw_event(&self, _ctx: Context, ev: RawEvent) -> Result<(), CetrizineError> {
-        let conn = self.pool.get()?;
+    fn archive_raw_event(&self, ctx: Context, ev: RawEvent) -> Result<(), CetrizineError> {
+        let conn = ctx.get_pool_arc().get()?;
         let recvd_duration = ev.happened_at_instant - self.beginning_of_time;
         let msg_type_str = ev.data.into_str();
         let (msg_content_text, msg_content_binary) = ev.data.into_two_data();
@@ -433,7 +432,7 @@ impl Handler {
 
     fn guild_create_result(&self, ctx: Context, guild: Guild, is_new: bool) -> Result<(), CetrizineError> {
         let channel_archiver_sender = self.archival_queue.lock().unwrap().clone();
-        let conn = self.pool.get()?;
+        let conn = ctx.get_pool_arc().get()?;
         let ev = ctx.raw_event.clone().unwrap();
         let recvd_duration = ev.happened_at_instant - self.beginning_of_time;
         trace!(
@@ -477,7 +476,7 @@ impl Handler {
                 *sent_notif = true;
             }
         }
-        let conn = self.pool.get()?;
+        let conn = ctx.get_pool_arc().get()?;
 
         let is_bot = ctx.is_bot();
         if is_bot && !ready.user.bot {
@@ -783,7 +782,7 @@ ORDER BY start_message_id ASC LIMIT 1;",
             )?.get(0).get(0):i64 > 0;
             let we_have_archived_this_before = already_archived_start && already_archived_end && (!around || already_archived_around);
             if we_have_archived_this_before {
-                error!(
+                warn!(
                     "We've archived this before! chan id {} {} {} start {} end {} in {}#{}",
                     chan.id(),
                     if around {"around"} else {"before"},
@@ -1133,10 +1132,10 @@ ORDER BY start_message_id ASC LIMIT 1;",
         Ok(())
     } //fn grab_archive ...
     
-    fn message_result(&self, _: Context, msg: Message) -> Result<(), CetrizineError> {
+    fn message_result(&self, ctx: Context, msg: Message) -> Result<(), CetrizineError> {
         let handler_start = Utc::now();
         //let kill_command = "shift alt bloodbath";
-        let conn = self.pool.get()?;
+        let conn = ctx.get_pool_arc().get()?;
         let guild_str;
         if let Some(guild_id) = msg.guild_id {
             if let Some(guild) = guild_id.to_guild_cached() {
@@ -1163,16 +1162,16 @@ ORDER BY start_message_id ASC LIMIT 1;",
         Ok(())
     }
 
-    fn _channel_create(&self, _ctx: Context, channel_lock: Arc<RwLock<GuildChannel>>) -> Result<(), CetrizineError> {
+    fn _channel_create(&self, ctx: Context, channel_lock: Arc<RwLock<GuildChannel>>) -> Result<(), CetrizineError> {
         let _recvd_at = Utc::now();
-        let _conn = self.pool.get()?;
+        let _conn = ctx.get_pool_arc().get()?;
         let chan = channel_lock.read();
         info!("Chan create! {:?}", chan.name);
         Ok(())
     }
 
-    fn record_shard_stage_update(&self, _ctx: Context, ssue: ShardStageUpdateEvent) -> Result<(), CetrizineError> {
-        let conn = self.pool.get()?;
+    fn record_shard_stage_update(&self, ctx: Context, ssue: ShardStageUpdateEvent) -> Result<(), CetrizineError> {
+        let conn = ctx.get_pool_arc().get()?;
         let moment = DbMoment::now(self.session_id, self.beginning_of_time);
         pg_insert_helper!(
             conn, "shard_stage_update_event",
@@ -1394,7 +1393,6 @@ DB migration version: {}",
         let arc_pool = Arc::new(pool);
 
         let handler = Handler{
-            pool: Arc::clone(&arc_pool),
             beginning_of_time,
             session_id,
             archival_queue: StdMutex::new(chan_tx),
@@ -1409,8 +1407,8 @@ DB migration version: {}",
                     if let Err(CetrizineError{backtrace: bt, error_type: CetrizineErrorType::Serenity(serenity::Error::Http(serenity::prelude::HttpError::UnsuccessfulRequest(mut http_response)))}) = res {
                         warn!(
                             "HTTP error!\n\nHTTP response: {:?}\n\nBacktrace: {:?}",
+                            http_response,
                             bt,
-                            http_response
                         );
                         let mut body = String::new();
                         match std::io::Read::read_to_string(&mut http_response, &mut body) {

@@ -30,7 +30,7 @@ version = "~0.15.2"
 features = ["with-serde_json","with-time","with-chrono"]
 
 [dependencies.serenity]
-version = "0.5.14-shel1"
+version = "0.5.14-shel3"
 path = "../serenity/"
 default-features = true
 features = ["raw-ws-event"]
