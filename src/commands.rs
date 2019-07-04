@@ -57,6 +57,12 @@ pub fn cetrizine_framework() -> StandardFramework {
                 .no_dm_prefix(true)
                 .owners(owners)
         )
+        .on_dispatch_error(|_, msg, error| {
+            debug!("Dispatch error. msg: {:?}, error: {:?}", msg, error);
+        })
+        .unrecognised_command(|_, msg, name| {
+            debug!("Unrecognized command {:?} {:?}", msg, name);
+        })
         .cmd("ping", ping)
         .cmd("Ping!", ping)
         .cmd("🏓", ping) //table tennis paddle
@@ -81,6 +87,10 @@ pub fn cetrizine_framework() -> StandardFramework {
         .cmd("be", binary_en)
         .cmd("pony", pony)
         .cmd("horse", horse)
+        .cmd("invite url", invite_url)
+        .cmd("invite_url", invite_url)
+        .cmd("invite", invite_url)
+        .cmd("inv", invite_url)
         .command(
             "r&r",
             |c| c
@@ -99,6 +109,12 @@ pub fn cetrizine_framework() -> StandardFramework {
                 .owners_only(true)
                 .cmd(send_raw)
         )
+        .command(
+            "restart",
+            |c| c
+                .owners_only(true)
+                .cmd(restart_bot)
+        )
 }
 
 macro_rules! command_log {
@@ -109,6 +125,18 @@ macro_rules! command_log {
         });
     };
 }
+
+command_log!(invite_url(_ctx, message) {
+    let user_id = USER_ID.load(Ordering::Relaxed);
+    let perms = Permissions::READ_MESSAGES | Permissions::SEND_MESSAGES | Permissions::EMBED_LINKS | Permissions::ATTACH_FILES | Permissions::READ_MESSAGE_HISTORY;
+    let url = format!(
+        "<https://discordapp.com/api/oauth2/authorize?client_id={}&scope=bot&permissions={}>",
+        user_id,
+        perms.bits(),
+    );
+    message.reply(&url)?;
+    Ok(())
+});
 
 command_log!(send_raw(_context, message, args) {
     let channel_id:u64 = args.single()?;
@@ -121,6 +149,17 @@ command_log!(send_raw(_context, message, args) {
 
 command_log!(restart_shard(context) {
     context.shard.shutdown_clean();
+    Ok(())
+});
+
+command_log!(restart_bot(context, message) {
+    warn!("Restart command called");
+    message.reply("About to restart")?;
+    {
+        let mut do_re_exec = DO_RE_EXEC.lock().unwrap();
+        *do_re_exec = Some(message.channel_id.0);
+    }
+    context.data.lock().get::<ShardManagerArcKey>().unwrap().lock().shutdown_all();
     Ok(())
 });
 

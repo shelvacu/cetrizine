@@ -1251,7 +1251,7 @@ ORDER BY start_message_id ASC LIMIT 1;",
         Ok(())
     }
 
-    fn channel_update_result(&self, _context: Context, old: Option<Channel>, new: Channel) -> Result<(), CetrizineError> {
+    fn channel_update_result(&self, _context: Context, _old: Option<Channel>, new: Channel) -> Result<(), CetrizineError> {
         let channel_archiver_sender = self.archival_queue.lock().unwrap().clone();
         let maybe_guild_lock = match &new {
             Channel::Guild(guild_channel_lock) => match guild_channel_lock.read().guild_id.to_guild_cached() {
@@ -1265,9 +1265,9 @@ ORDER BY start_message_id ASC LIMIT 1;",
         };
         //let () = maybe_guild_lock;
         let user_id = UserId(USER_ID.load(Ordering::Relaxed));
-        if let (Some(guild_lock),Some(old)) = (maybe_guild_lock.as_ref(), old.as_ref()) {
+        if let Some(guild_lock) = maybe_guild_lock.as_ref() {
             let guild = guild_lock.read();
-            if !guild.permissions_in(old.id(), user_id).read_message_history() && guild.permissions_in(new.id(), user_id).read_message_history() {
+            if guild.permissions_in(new.id(), user_id).read_message_history() {
                 channel_archiver_sender.send((
                     new.clone(),
                     guild.name.clone(),
@@ -1276,22 +1276,47 @@ ORDER BY start_message_id ASC LIMIT 1;",
         } else {
             channel_archiver_sender.send((
                 new.clone(),
-                match maybe_guild_lock {
-                    Some(guild_lock) => guild_lock.read().name.clone(),
-                    None => String::from(""),
-                }
+                String::from(""),
             )).unwrap();
         }
         Ok(())
     }
 
-    fn guild_member_update_result(&self, _context: Context, _old: Option<Member>, new: Member) -> Result<(), CetrizineError> {
+    fn recheck_guild_permissions(&self, _ctx: Context, guild_id: GuildId) -> Result<(), CetrizineError> {
+        let channel_archiver_sender = self.archival_queue.lock().unwrap().clone();
         let my_id = UserId(USER_ID.load(Ordering::Relaxed));
-        if new.user_id() == my_id {
-            //Oh hey, that's me! I got updated.
-            //TODO
+        debug!("Rechecking perms for guild id {:?}", guild_id);
+        let mut new_chans:Vec<Channel> = Vec::new();
+        if let Some(guild_lock) = guild_id.to_guild_cached() {
+            let guild = guild_lock.read();
+            for chan_id in guild.channels.keys() {
+                debug!("Rechecking perms for chan id {:?}", chan_id);
+                if guild.permissions_in(chan_id, my_id).read_message_history() {
+                    let new_chan = serenity::http::raw::get_channel(chan_id.0)?;
+                    debug!("Rechecking found we can read messages in {:?}; chan is {:?}", chan_id, new_chan);
+                    channel_archiver_sender.send((
+                        new_chan.clone(),
+                        guild.name.clone(),
+                    )).unwrap();
+                    new_chans.push(new_chan);
+                }
+            }
+        } else { warn!("Guild {:?} not found in cache", guild_id); }
+
+        for new_chan in new_chans {
+            let mut cache = serenity::CACHE.write();
+            let _old = cache.insert_channel(&new_chan);
         }
-        //let () = old;
+
+        Ok(())
+    }
+
+    fn guild_member_update_result(&self, ctx: Context, _old: Option<Member>, new: Member) -> Result<(), CetrizineError> {
+        let my_id = UserId(USER_ID.load(Ordering::Relaxed));
+        debug!("gmur: new is {:?}, I'm {:?}", new, my_id);
+        if new.user_id() == my_id {
+            self.recheck_guild_permissions(ctx, new.guild_id)?;
+        }
         Ok(())
     }
 }
@@ -1331,6 +1356,25 @@ impl EventHandler for Handler {
 
     fn guild_member_update(&self, context: Context, old: Option<Member>, new: Member) {
         log_any_error!(self.guild_member_update_result(context, old, new));
+    }
+
+    fn guild_role_create(&self, context: Context, guild_id: GuildId, _new: Role) {
+        log_any_error!(self.recheck_guild_permissions(context, guild_id));
+    }
+
+    fn guild_role_delete(&self, context: Context, guild_id: GuildId, _removed_id: RoleId, _removed: Option<Role>) {
+        log_any_error!(self.recheck_guild_permissions(context, guild_id));
+    }
+    fn guild_role_update(&self, context: Context, guild_id: GuildId, _old: Option<Role>, _new: Role) {
+        log_any_error!(self.recheck_guild_permissions(context, guild_id));
+    }
+    fn guild_update(
+        &self,
+        context: Context,
+        _old_data_if_available: Option<Arc<RwLock<Guild>>>,
+        new: PartialGuild
+    ) {
+        log_any_error!(self.recheck_guild_permissions(context, new.id));
     }
 }
 
@@ -1413,7 +1457,7 @@ DB migration version: {}",
                 beginning_of_time
             )
         );
-        multi_log::MultiLogger::init(vec![simple_logger, pg_logger], simplelog::Level::Info).expect("Failed to intialize logging.");
+        multi_log::MultiLogger::init(vec![simple_logger, pg_logger], simplelog::Level::Debug).expect("Failed to intialize logging.");
         info!("Cetrizine logging initialized.");
         
         if do_migrate {
@@ -1513,7 +1557,8 @@ DB migration version: {}",
     if let Some(chan_id) = do_re_exec {
         let args:Vec<OsString> = std::env::args_os().collect();
         let chan_str = format!("{}", chan_id);
-        let err = process::Command::new(&args[0])
+        info!("Going in for re-exec");
+        let err = process::Command::new("target/release/cetrizine")//(&args[0])
             .args(&args[1..])
             .env("RE_EXECD", chan_str)
             .exec();
