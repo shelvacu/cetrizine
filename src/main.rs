@@ -124,7 +124,7 @@ mod legacy; //this *must* come after the pg_insert_helper macro
 mod db_types;
 mod migrations;
 mod postgres_logger;
-mod commands;
+//mod commands;
 
 use db_types::*;
 
@@ -163,11 +163,11 @@ trait ContextExt {
 
 impl ContextExt for Context {
     fn get_pool_arc(&self) -> Arc<r2d2::Pool<r2d2_postgres::PostgresConnectionManager>> {
-        Arc::clone(self.data.lock().get::<PoolArcKey>().unwrap())
+        Arc::clone(self.data.read().get::<PoolArcKey>().unwrap())
     }
 
     fn is_bot(&self) -> bool {
-        *self.data.lock().get::<IsBotBoolKey>().unwrap()
+        *self.data.read().get::<IsBotBoolKey>().unwrap()
     }
 }    
 
@@ -265,19 +265,18 @@ enum_stringify!{ serenity::model::guild::DefaultMessageNotificationLevel => All,
 enum_stringify!{ serenity::model::guild::ExplicitContentFilter => None, WithoutRole, All }
 enum_stringify!{ serenity::model::guild::MfaLevel => None, Elevated }
 enum_stringify!{ serenity::model::guild::VerificationLevel => None, Low, Medium, High, Higher }
-enum_stringify!{ serenity::model::channel::ChannelType => Text, Private, Voice, Group, Category }
-enum_stringify!{ serenity::model::gateway::GameType => Playing, Streaming, Listening }
+enum_stringify!{ serenity::model::channel::ChannelType => Text, Private, Voice, Group, Category, News }
+enum_stringify!{ serenity::model::gateway::ActivityType => Playing, Streaming, Listening }
 enum_stringify!{ serenity::model::user::OnlineStatus => DoNotDisturb, Idle, Invisible, Offline, Online }
 enum_stringify!{ serenity::gateway::ConnectionStage => Connected, Connecting, Disconnected, Handshake, Identifying, Resuming }
 enum_stringify!{ log::Level => Error, Warn, Info, Debug, Trace }
 
-impl EnumIntoString for serenity::OwnedMessage {
+impl EnumIntoString for serenity::WsMessage {
     fn into_str(&self) -> &'static str {
-        use serenity::OwnedMessage::*;
+        use serenity::WsMessage::*;
         match self {
             Text(_) => "Text",
             Binary(_) => "Binary",
-            Close(_) => "Close",
             Ping(_) => "Ping",
             Pong(_) => "Pong",
         }
@@ -307,14 +306,13 @@ trait OwnedMessageExt : Sized {
     }
 }
 
-impl OwnedMessageExt for serenity::OwnedMessage {
+impl OwnedMessageExt for serenity::WsMessage {
     fn into_data(self) -> OwnedMessageData {
-        use serenity::OwnedMessage::*;
+        use serenity::WsMessage::*;
         use OwnedMessageData::*;
         match self {
             Text(s) => TextData(s),
             Binary(d) => BinaryData(Some(d)),
-            Close(od) => BinaryData(od.map(|cd| cd.into_bytes().unwrap())),
             Ping(d) => BinaryData(Some(d)),
             Pong(d) => BinaryData(Some(d)),
         }
@@ -429,7 +427,7 @@ impl From<r2d2::Error> for CetrizineError {
 
 
 impl Handler {
-    fn archive_raw_event(&self, ctx: Context, ev: RawEvent) -> Result<(), CetrizineError> {
+    fn archive_raw_event(&self, ctx: Context, ev: WsEvent) -> Result<(), CetrizineError> {
         let conn = ctx.get_pool_arc().get()?;
         let recvd_duration = ev.happened_at_instant - self.beginning_of_time;
         let msg_type_str = ev.data.into_str();
@@ -498,7 +496,7 @@ impl Handler {
             let chan_id:u64 = val.parse().unwrap();
             let mut sent_notif = SENT_REBOOT_NOTIF.lock().unwrap();
             if !*sent_notif {
-                ChannelId(chan_id).send_message(|m| m.content("Reboot finished"))?;
+                ChannelId(chan_id).send_message(&ctx, |m| m.content("Reboot finished"))?;
                 *sent_notif = true;
             }
         }
@@ -573,10 +571,7 @@ impl Handler {
             pg_insert_helper!(
                 tx, "attachment",
                 message_rowid => message_rowid,
-                discord_id => DbSnowflake::from(
-                    //Yes, attachment.id is a String when all the other .id's are a u64 wrapper
-                    attachment.id.parse().expect("could not parse attachment discord id"):i64
-                ),
+                discord_id => DbSnowflake::from(attachment.id),
                 filename => attachment.filename.filter_null(),
                 height => attachment.height.map(|h| h.try_into().unwrap():i64),
                 width  => attachment.width .map(|w| w.try_into().unwrap():i64),
@@ -647,7 +642,7 @@ impl Handler {
     }
 
     //guild_name is used purely for the pretty output and debug messages
-    fn grab_channel_archive<C: pg::GenericConnection>(conn: &C, chan: &Channel, guild_name: String) -> Result<(), CetrizineError> {
+    fn grab_channel_archive<C: pg::GenericConnection>(http: impl AsRef<serenity::http::raw::Http>, conn: &C, chan: &Channel, guild_name: String) -> Result<(), CetrizineError> {
         let name = get_name(chan);
         info!("ARCHIVING CHAN {}#{} (id {})", &guild_name, &name, &chan.id());
         let mut got_messages = false;
@@ -770,11 +765,11 @@ ORDER BY start_message_id ASC LIMIT 1;",
             if earliest_message_recvd == DISCORD_MAX_SNOWFLAKE {
                 trace!("asking for around {}", last_msg_id);
                 around = true;
-                msgs = chan.id().messages(|r| r.limit(asking_for.into()).around(last_msg_id))?;
+                msgs = chan.id().messages(&http, |r| r.limit(asking_for.into()).around(last_msg_id))?;
             }else{
                 trace!("asking for before {}",earliest_message_recvd);
                 around = false;
-                msgs = chan.id().messages(|r| r.limit(asking_for.into()).before(earliest_message_recvd))?;
+                msgs = chan.id().messages(&http, |r| r.limit(asking_for.into()).before(earliest_message_recvd))?;
             }
             let recvd_at = Utc::now();
             
@@ -859,7 +854,7 @@ ORDER BY start_message_id ASC LIMIT 1;",
         
         if got_messages {
             trace!("recursing!");
-            Self::grab_channel_archive(conn, chan, guild_name)
+            Self::grab_channel_archive(http, conn, chan, guild_name)
         } else {
             Ok(())
         }
@@ -988,7 +983,7 @@ ORDER BY start_message_id ASC LIMIT 1;",
                 tx, "user_presence",
                 ready_rowid => None:Option<i64>,
                 guild_rowid => guild_rowid, //guild_rowid
-                game => presence.game.clone().map(DbUserPresenceGame::from),
+                game => presence.activity.clone().map(DbUserPresenceGame::from),
                 last_modified => presence.last_modified.map(|v| v.try_into().unwrap():i64),
                 nick => presence.nick.filter_null(),
                 status => presence.status.into_str(),
@@ -1041,6 +1036,7 @@ ORDER BY start_message_id ASC LIMIT 1;",
                 Voice => continue,
                 Group => (),
                 Category => continue,
+                News => (),
             }
 
             let uid = USER_ID.load(Ordering::Relaxed);
@@ -1091,7 +1087,7 @@ ORDER BY start_message_id ASC LIMIT 1;",
                 tx, "user_presence",
                 ready_rowid => ready_rowid,
                 guild_rowid => None:Option<i64>,
-                game => presence.game.clone().map(DbUserPresenceGame::from),
+                game => presence.activity.clone().map(DbUserPresenceGame::from),
                 last_modified => presence.last_modified.map(|v| v.try_into().unwrap():i64),
                 nick => presence.nick.filter_null(),
                 status => presence.status.into_str(),
@@ -1167,7 +1163,7 @@ ORDER BY start_message_id ASC LIMIT 1;",
 
         for chan_id in &private_channels_to_archive {
             channel_archiver_sender.send((
-                chan_id.to_channel_cached().expect("channel absolutely should be cached"),
+                chan_id.to_channel_cached(&ctx).expect("channel absolutely should be cached"),
                 String::from(""),
             )).unwrap();
         }
@@ -1180,10 +1176,10 @@ ORDER BY start_message_id ASC LIMIT 1;",
         let conn = ctx.get_pool_arc().get()?;
         let guild_str;
         if let Some(guild_id) = msg.guild_id {
-            if let Some(guild) = guild_id.to_guild_cached() {
+            if let Some(guild) = guild_id.to_guild_cached(&ctx) {
                 guild_str = format!("GNAME: {}", guild.read().name);
             } else {
-                match guild_id.to_partial_guild() {
+                match guild_id.to_partial_guild(&ctx) {
                     Ok(part_guild) => guild_str = format!("GNAME: {}", part_guild.name),
                     Err(e) => guild_str = format!("GNAME_ERR: {:?}", e)
                 }
@@ -1191,7 +1187,7 @@ ORDER BY start_message_id ASC LIMIT 1;",
         } else {
             guild_str = String::from("NOGUILD");
         }
-        let chan_info = format!("CHAN: {:?}", msg.channel_id.to_channel_cached().map(|c| get_name(&c)));
+        let chan_info = format!("CHAN: {:?}", msg.channel_id.to_channel_cached(&ctx).map(|c| get_name(&c)));
         let date_info = format!("DATE: {:?}", handler_start);
         let user_info = format!("USER: {:?}#{}", msg.author.name, msg.author.discriminator);
         let mesg_info = format!("MESG: {:?}", msg.content);
@@ -1251,10 +1247,10 @@ ORDER BY start_message_id ASC LIMIT 1;",
         Ok(())
     }
 
-    fn channel_update_result(&self, _context: Context, _old: Option<Channel>, new: Channel) -> Result<(), CetrizineError> {
+    fn channel_update_result(&self, ctx: Context, _old: Option<Channel>, new: Channel) -> Result<(), CetrizineError> {
         let channel_archiver_sender = self.archival_queue.lock().unwrap().clone();
         let maybe_guild_lock = match &new {
-            Channel::Guild(guild_channel_lock) => match guild_channel_lock.read().guild_id.to_guild_cached() {
+            Channel::Guild(guild_channel_lock) => match guild_channel_lock.read().guild_id.to_guild_cached(&ctx) {
                 Some(g) => Some(g),
                 None => {
                     warn!("Received a channel update event but guild was not cached");
@@ -1282,17 +1278,17 @@ ORDER BY start_message_id ASC LIMIT 1;",
         Ok(())
     }
 
-    fn recheck_guild_permissions(&self, _ctx: Context, guild_id: GuildId) -> Result<(), CetrizineError> {
+    fn recheck_guild_permissions(&self, ctx: Context, guild_id: GuildId) -> Result<(), CetrizineError> {
         let channel_archiver_sender = self.archival_queue.lock().unwrap().clone();
         let my_id = UserId(USER_ID.load(Ordering::Relaxed));
         debug!("Rechecking perms for guild id {:?}", guild_id);
         let mut new_chans:Vec<Channel> = Vec::new();
-        if let Some(guild_lock) = guild_id.to_guild_cached() {
+        if let Some(guild_lock) = guild_id.to_guild_cached(&ctx) {
             let guild = guild_lock.read();
             for chan_id in guild.channels.keys() {
                 debug!("Rechecking perms for chan id {:?}", chan_id);
                 if guild.permissions_in(chan_id, my_id).read_message_history() {
-                    let new_chan = serenity::http::raw::get_channel(chan_id.0)?;
+                    let new_chan = ctx.get_http().get_channel(chan_id.0)?;
                     debug!("Rechecking found we can read messages in {:?}; chan is {:?}", chan_id, new_chan);
                     channel_archiver_sender.send((
                         new_chan.clone(),
@@ -1304,7 +1300,7 @@ ORDER BY start_message_id ASC LIMIT 1;",
         } else { warn!("Guild {:?} not found in cache", guild_id); }
 
         for new_chan in new_chans {
-            let mut cache = serenity::CACHE.write();
+            let mut cache = ctx.get_cache().write();
             let _old = cache.insert_channel(&new_chan);
         }
 
@@ -1338,7 +1334,7 @@ impl EventHandler for Handler {
         log_any_error!(self._channel_create(ctx, channel));
     }*/
 
-    fn raw_websocket_packet(&self, ctx: Context, packet: RawEvent) {
+    fn raw_websocket_packet(&self, ctx: Context, packet: WsEvent) {
         log_any_error!(self.archive_raw_event(ctx, packet));
     }
 
@@ -1511,12 +1507,13 @@ DB migration version: {}",
         };
         let mut client = Client::new(&discord_token, handler).expect("Err creating client");
 
+        let threads_cache_and_http = Arc::clone(&client.cache_and_http);
         let threads_arc_pool = Arc::clone(&arc_pool);
         std::thread::spawn(move || {
             while let Ok((channel, guild_name)) = chan_rx.recv() {
                 if let Some(conn) = log_any_error!(threads_arc_pool.get()) {
-                    let res = Handler::grab_channel_archive(&*conn, &channel, guild_name);
-                    if let Err(CetrizineError{backtrace: bt, error_type: CetrizineErrorType::Serenity(serenity::Error::Http(serenity::prelude::HttpError::UnsuccessfulRequest(mut http_response)))}) = res {
+                    let res = Handler::grab_channel_archive(threads_cache_and_http.as_ref(), &*conn, &channel, guild_name);
+                    /*if let Err(CetrizineError{backtrace: bt, error_type: CetrizineErrorType::Serenity(serenity::Error::Http(serenity::prelude::HttpError::UnsuccessfulRequest(mut http_response)))}) = res {
                         warn!(
                             "HTTP error!\n\nHTTP response: {:?}\n\nBacktrace: {:?}",
                             http_response,
@@ -1527,7 +1524,7 @@ DB migration version: {}",
                             Ok(body) => warn!("HTTP body: {:?}", body),
                             Err(why) => warn!("could not read http body {:?}", why),
                         }
-                    }else{ log_any_error!(res); }
+                    }else{*/ log_any_error!(res); //}
                 }
             }
         });
@@ -1535,13 +1532,13 @@ DB migration version: {}",
         let is_bot = discord_token.starts_with("Bot ");
         if is_bot {
             info!("Detected bot token, running with commands enabled");
-            client.with_framework(commands::cetrizine_framework());
+            //client.with_framework(commands::cetrizine_framework());
         }else{
             info!("Found non-bot token, will not respond to commands");
         }
 
         {
-            let mut data = client.data.lock();
+            let mut data = client.data.write();
             data.insert::<PoolArcKey>(Arc::clone(&arc_pool));
             data.insert::<IsBotBoolKey>(is_bot);
             let shard_manager_arc = Arc::clone(&client.shard_manager);

@@ -142,8 +142,11 @@ command_log!(send_raw(_context, message, args) {
     let channel_id:u64 = args.single()?;
     let message_to_send_content = args.rest();
 
-    ChannelId(channel_id).send_message(|m| m.content(message_to_send_content))?;
-    message.reply("Message sent")?;
+    let to_send_to = ChannelId(channel_id);
+    to_send_to.send_message(|m| m.content(message_to_send_content))?;
+    if to_send_to != message.channel_id {
+        message.reply("Message sent")?;
+    }
     Ok(())
 });
 

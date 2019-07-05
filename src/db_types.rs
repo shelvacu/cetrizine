@@ -16,7 +16,7 @@ pub trait Snowflake {
     }
 }
 
-macro_rules! snowflake_impl {
+macro_rules! snowflake_impl_old {
     ($klass:ty) => {
         impl Snowflake for $klass {
             fn get_snowflake(&self) -> u64 {
@@ -32,7 +32,24 @@ macro_rules! snowflake_impl {
     };
 }
 
+macro_rules! snowflake_impl {
+    ($klass:ty) => {
+        impl Snowflake for $klass {
+            fn get_snowflake(&self) -> u64 {
+                *self.as_u64()
+            }
+        }
+
+        impl Snowflake for &$klass {
+            fn get_snowflake(&self) -> u64 {
+                *self.as_u64()
+            }
+        }
+    };
+}
+
 snowflake_impl!{ApplicationId}
+snowflake_impl!{AttachmentId}
 snowflake_impl!{AuditLogEntryId}
 snowflake_impl!{ChannelId}
 snowflake_impl!{EmojiId}
@@ -40,9 +57,9 @@ snowflake_impl!{GuildId}
 snowflake_impl!{IntegrationId}
 snowflake_impl!{MessageId}
 snowflake_impl!{RoleId}
+snowflake_impl_old!{ShardId}
 snowflake_impl!{UserId}
 snowflake_impl!{WebhookId}
-snowflake_impl!{ShardId}
 
 #[derive(Debug)]
 pub struct SmartHax<T: Debug>(pub T);
@@ -366,8 +383,8 @@ pub struct DbUserPresenceGameInner{
 #[postgres(name = "user_presence_game")]
 pub struct DbUserPresenceGame(pub DbUserPresenceGameInner);
 
-impl From<Game> for DbUserPresenceGame {
-    fn from(g: Game) -> Self {
+impl From<Activity> for DbUserPresenceGame {
+    fn from(g: Activity) -> Self {
         DbUserPresenceGame(DbUserPresenceGameInner{
             kind: g.kind.into_str().to_string(),
             name: g.name.filter_null(),
@@ -429,7 +446,7 @@ impl DbMoment {
     }
 
     #[allow(dead_code)]
-    pub fn from_rawevent(session_id: i64, beginning_of_time: std::time::Instant, ev: serenity::model::event::RawEvent) -> Self {
+    pub fn from_rawevent(session_id: i64, beginning_of_time: std::time::Instant, ev: serenity::model::event::WsEvent) -> Self {
         let duration = ev.happened_at_instant.duration_since(beginning_of_time);
         Self::from_pieces(session_id, ev.happened_at_chrono, duration)
     }
