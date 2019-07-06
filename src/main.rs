@@ -3,6 +3,7 @@
 #![feature(const_slice_len)]
 #![feature(option_flattening)]
 #![feature(type_ascription)]
+#![feature(param_attrs)]
 #![deny(unused_must_use)]
 #![allow(clippy::mutex_atomic)]
 
@@ -21,7 +22,6 @@ extern crate rusqlite as sqlite;
 extern crate pbr;
 
 //Main discord library
-#[macro_use]
 extern crate serenity;
 
 //Database, database connection pooling
@@ -124,7 +124,9 @@ mod legacy; //this *must* come after the pg_insert_helper macro
 mod db_types;
 mod migrations;
 mod postgres_logger;
-//mod commands;
+#[macro_use]
+mod command_log_macro;
+mod commands;
 
 use db_types::*;
 
@@ -1532,9 +1534,10 @@ DB migration version: {}",
         let is_bot = discord_token.starts_with("Bot ");
         if is_bot {
             info!("Detected bot token, running with commands enabled");
-            //client.with_framework(commands::cetrizine_framework());
+            let current_user = client.cache_and_http.http.get_current_user().expect("I don't know who I am!");
+            client.with_framework(commands::cetrizine_framework(current_user.id));
         }else{
-            info!("Found non-bot token, will not respond to commands");
+            warn!("Found non-bot token, will not respond to commands");
         }
 
         {

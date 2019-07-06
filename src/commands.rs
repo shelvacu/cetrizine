@@ -8,13 +8,17 @@ use crate::{
     db_types::SmartHax,
     r2d2,
     r2d2_postgres,
+//    command_log_macro,
 };
 use serenity::{
     model::prelude::*,
     prelude::*,
     framework::standard::{
         StandardFramework,
+        CommandResult,
         Args,
+        macros::{command, group},
+        //help_commands,
         //CommandOptions,
     }
 };
@@ -41,6 +45,107 @@ fn some_kind_of_uppercase_first_letter(s: &str) -> String {
     }
 }
 
+fn get_guild_prefix(
+    pool: &Arc<r2d2::Pool<r2d2_postgres::PostgresConnectionManager>>,
+    guild_id: GuildId
+) -> Result<Option<String>,CetrizineError> {
+    let conn = pool.get()?;
+    let rows = conn.query(
+        "SELECT command_prefix FROM guild_prefixes WHERE guild_id = $1",
+        &[&i64::from(guild_id)]
+    )?;
+    if rows.is_empty() {
+        Ok(None)
+    } else if rows.len() == 1 {
+        let prefix:String = rows.get(0).get(0);
+        Ok(Some(prefix))
+    } else { unreachable!() }
+}
+
+fn inner_dynamic_prefix(
+    context: &Context,
+    message: &Message,
+) -> Result<Option<String>, CetrizineError> {
+    if let Some(guild_id) = message.guild_id {
+        // I'd like to put this in a cache, but premature
+        // optimization is the root of all evil.
+        Ok(get_guild_prefix(&context.get_pool_arc(), guild_id)?)
+    } else {
+        Ok(None)
+    }
+}
+
+pub fn cetrizine_framework(my_id: UserId) -> StandardFramework {
+    let owners = vec![
+        #[allow(clippy::unreadable_literal)] //This literal isn't meant to be read, it's an ID
+        UserId(165858230327574528)
+    ].into_iter().collect();
+    StandardFramework::new()
+        .configure(
+            |c| c
+                .dynamic_prefix(move |context, message| {
+                    log_any_error!(inner_dynamic_prefix(context, message)).flatten()
+                })
+                .by_space(false)
+                .on_mention(Some(my_id))
+                .no_dm_prefix(true)
+                .owners(owners)
+        )
+        .group(&DEFAULT_GROUP)
+        .group(&OWNER_GROUP)
+}
+
+group!({
+    name: "default",
+    options: {},
+    commands: [
+        ping,
+        set_prefix,
+        get_prefix,
+        help_info,
+        binary,
+        binary_en,
+        binary_de,
+        pony,
+        horse,
+        invite_url,
+    ],
+});
+
+group!({
+    name: "owner",
+    options: {
+        owners_only: true,
+    },
+    commands: [
+        recompile_and_run,
+        raw_message,
+        restart_bot,
+    ],
+});
+
+#[command]
+#[aliases("🏓")]
+fn ping ( ctx : & mut Context , message : & Message , _args : Args ) -> CommandResult {
+    let res : Result < (  ) , CetrizineError > =
+    { message.reply(ctx, "Pong!")?; Ok(()) } ;
+    log_any_error ! ( res ) ;
+    Ok(())
+}
+
+/*
+trace_macros!(true);
+command_log!(
+    #[alias("Ping!", "🏓")]
+    fn ping(ctx, message) {
+        message.reply(ctx, "Pong!")?;
+        Ok(())
+    }
+);
+trace_macros!(false);
+*/
+
+/*
 pub fn cetrizine_framework() -> StandardFramework {
     let owners = vec![
         #[allow(clippy::unreadable_literal)] //This literal isn't meant to be read, it's an ID
@@ -115,120 +220,139 @@ pub fn cetrizine_framework() -> StandardFramework {
                 .owners_only(true)
                 .cmd(restart_bot)
         )
-}
+}*/
 
-macro_rules! command_log {
-    ($fname:ident($($arg:ident),+) $b:block) => {
-        command!($fname($($arg),+) {
-            let res:Result<(), CetrizineError> = $b;
-            log_any_error!(res);
-        });
-    };
-}
-
-command_log!(invite_url(_ctx, message) {
-    let user_id = USER_ID.load(Ordering::Relaxed);
-    let perms = Permissions::READ_MESSAGES | Permissions::SEND_MESSAGES | Permissions::EMBED_LINKS | Permissions::ATTACH_FILES | Permissions::READ_MESSAGE_HISTORY;
-    let url = format!(
-        "<https://discordapp.com/api/oauth2/authorize?client_id={}&scope=bot&permissions={}>",
-        user_id,
-        perms.bits(),
-    );
-    message.reply(&url)?;
-    Ok(())
-});
-
-command_log!(send_raw(_context, message, args) {
-    let channel_id:u64 = args.single()?;
-    let message_to_send_content = args.rest();
-
-    let to_send_to = ChannelId(channel_id);
-    to_send_to.send_message(|m| m.content(message_to_send_content))?;
-    if to_send_to != message.channel_id {
-        message.reply("Message sent")?;
+command_log!(
+    #[aliases("invite url", "invite", "inv")]
+    fn invite_url(ctx, message) {
+        let user_id = USER_ID.load(Ordering::Relaxed);
+        let perms = Permissions::READ_MESSAGES | Permissions::SEND_MESSAGES | Permissions::EMBED_LINKS | Permissions::ATTACH_FILES | Permissions::READ_MESSAGE_HISTORY;
+        let url = format!(
+            "<https://discordapp.com/api/oauth2/authorize?client_id={}&scope=bot&permissions={}>",
+            user_id,
+            perms.bits(),
+        );
+        message.reply(ctx, &url)?;
+        Ok(())
     }
-    Ok(())
-});
+);
 
-command_log!(restart_shard(context) {
-    context.shard.shutdown_clean();
-    Ok(())
-});
+command_log!(
+    #[aliases("raw message","rawmessage")]
+    fn raw_message(ctx, message, args) {
+        let channel_id:u64 = args.single()?;
+        let message_to_send_content = args.rest();
 
-command_log!(restart_bot(context, message) {
-    warn!("Restart command called");
-    message.reply("About to restart")?;
-    {
-        let mut do_re_exec = DO_RE_EXEC.lock().unwrap();
-        *do_re_exec = Some(message.channel_id.0);
-    }
-    context.data.lock().get::<ShardManagerArcKey>().unwrap().lock().shutdown_all();
-    Ok(())
-});
-
-command_log!(recompile_and_run(context, message) {
-    warn!("Recompile command called");
-    let mut messages_to_show = Vec::new();
-    let analyzer_res = coral::Analyzer::with_args(coral::Checker::Build, &["--release"]);
-    let analyzer = match analyzer_res {
-        Ok(anal) => anal,
-        Err(why) => {
-            message.reply(&format!("Error running cargo: {:?}", why))?;
-            return Ok(())
+        let to_send_to = ChannelId(channel_id);
+        to_send_to.send_message(&ctx, |m| m.content(message_to_send_content))?;
+        if to_send_to != message.channel_id {
+            message.reply(&ctx, "Message sent")?;
         }
-    };
-    message.reply("Starting compilation")?;
-    for entry in analyzer {
-        if let Some(cargo_msg) = entry.message {
-            if cargo_msg.is_warning() || cargo_msg.is_error() {
-                messages_to_show.push(cargo_msg);
-            }
-        }
+        Ok(())
     }
-    if !messages_to_show.is_empty() {
-        let message_reports:Vec<String> = messages_to_show
-            .into_iter()
-            .map(|m| m.report(false, 80usize).unwrap_or_else(String::new))
-            .collect();
+);
 
-        message.reply(&format!("Errors or warnings found, not running:\n\n```{}```", message_reports.join("\n\n")))?;
-    } else {
-        message.reply("About to restart into new code.")?;
+/*command_log!(
+    #[aliases("restartshard")]
+    fn restart_shard(context) {
+        context.shard.shutdown_clean();
+        Ok(())
+    }
+);*/
+
+command_log!(
+    #[aliases("restart")]
+    fn restart_bot(ctx, message) {
+        warn!("Restart command called");
+        message.reply(&ctx, "About to restart")?;
         {
             let mut do_re_exec = DO_RE_EXEC.lock().unwrap();
             *do_re_exec = Some(message.channel_id.0);
         }
-        context.data.lock().get::<ShardManagerArcKey>().unwrap().lock().shutdown_all();
+        ctx.data.read().get::<ShardManagerArcKey>().unwrap().lock().shutdown_all();
+        Ok(())
     }
-    Ok(())
-});
+);
 
-command_log!(horse(_context, message){
-    message.channel_id.send_files(vec!["996592.png"], |m| m)?;
-    Ok(())
-});
+command_log!(
+    #[aliases("r&r")]
+    fn recompile_and_run(ctx, message) {
+        warn!("Recompile command called");
+        let mut messages_to_show = Vec::new();
+        let analyzer_res = coral::Analyzer::with_args(coral::Checker::Build, &["--release"]);
+        let analyzer = match analyzer_res {
+            Ok(anal) => anal,
+            Err(why) => {
+                message.reply(&ctx, &format!("Error running cargo: {:?}", why))?;
+                return Ok(())
+            }
+        };
+        message.reply(&ctx, "Starting compilation")?;
+        for entry in analyzer {
+            if let Some(cargo_msg) = entry.message {
+                if cargo_msg.is_warning() || cargo_msg.is_error() {
+                    messages_to_show.push(cargo_msg);
+                }
+            }
+        }
+        if !messages_to_show.is_empty() {
+            let message_reports:Vec<String> = messages_to_show
+                .into_iter()
+                .map(|m| m.report(false, 80usize).unwrap_or_else(String::new))
+                .collect();
 
-command_log!(pony(_context, message){
-    message.channel_id.send_files(vec!["1955980.png"], |m| m)?;
-    Ok(())
-});
+            message.reply(&ctx, &format!("Errors or warnings found, not running:\n\n```{}```", message_reports.join("\n\n")))?;
+        } else {
+            message.reply(&ctx, "About to restart into new code.")?;
+            {
+                let mut do_re_exec = DO_RE_EXEC.lock().unwrap();
+                *do_re_exec = Some(message.channel_id.0);
+            }
+            ctx.data.read().get::<ShardManagerArcKey>().unwrap().lock().shutdown_all();
+        }
+        Ok(())
+    }
+);
 
-command_log!(binary_de(context, message, args){
-    message.reply(&decode_binary(context, message, args.rest().to_string())?)?;
-    Ok(())
-});   
+command_log!(
+    fn horse(ctx, message){
+        message.channel_id.send_files(&ctx, vec!["996592.png"], |m| m)?;
+        Ok(())
+    }
+);
 
-command_log!(binary_en(context, message, args){
-    message.reply(&encode_binary(context, message, args.rest().to_string())?)?;
-    Ok(())
-});   
+command_log!(
+    fn pony(ctx, message){
+        message.channel_id.send_files(&ctx, vec!["1955980.png"], |m| m)?;
+        Ok(())
+    }
+);
 
-command_log!(binary(context, message, args){
-    //let res = decode_binary(context, message, args.rest().to_string())?;
-    let res = guess_binary(context, message, args)?;
-    message.reply(&res)?;
-    Ok(())
-});
+command_log!(
+    #[aliases("binarydecode", "bd")]
+    fn binary_de(ctx, message, args){
+        message.reply(&ctx, &decode_binary(ctx, message, args.rest().to_string())?)?;
+        Ok(())
+    }
+);
+
+command_log!(
+    #[aliases("binaryencode", "be")]
+    fn binary_en(ctx, message, args){
+        message.reply(&ctx, &encode_binary(ctx, message, args.rest().to_string())?)?;
+        Ok(())
+    }
+);
+
+command_log!(
+    #[aliases("b")]
+    fn binary(ctx, message, args){
+        //let res = decode_binary(context, message, args.rest().to_string())?;
+        let res = guess_binary(ctx, message, args)?;
+        message.reply(&ctx, &res)?;
+        Ok(())
+    }
+);
 
 fn max(a:f32,b:f32)->f32{if a<b { b } else { a }}
 
@@ -313,10 +437,8 @@ fn decode_binary(
     if bits.len() % 8 != 0 {
         result_text.push_str(&format!("WARN: Number of bits({}) is not a multiple of 8\n", bits.len()));
     }
-    info!("bits {:?}", &bits);
     let mut bytes:Vec<u8> = Vec::new();
     for chunk in bits.chunks_exact(8usize) {
-        info!("chunk: {:?}", &chunk);
         let byte:u8 =
             chunk[0].into_u8() << 7
             | chunk[1].into_u8() << 6
@@ -326,7 +448,6 @@ fn decode_binary(
             | chunk[5].into_u8() << 2
             | chunk[6].into_u8() << 1
             | chunk[7].into_u8();
-        info!("byte: {:?}", &byte);
         bytes.push(byte);
     }
     let bytes = bytes;
@@ -335,53 +456,29 @@ fn decode_binary(
     Ok(result_text)
 }
 
-fn get_guild_prefix(
-    pool: &Arc<r2d2::Pool<r2d2_postgres::PostgresConnectionManager>>,
-    guild_id: GuildId
-) -> Result<Option<String>,CetrizineError> {
-    let conn = pool.get()?;
-    let rows = conn.query(
-        "SELECT command_prefix FROM guild_prefixes WHERE guild_id = $1",
-        &[&i64::from(guild_id)]
-    )?;
-    if rows.is_empty() {
-        Ok(None)
-    } else if rows.len() == 1 {
-        let prefix:String = rows.get(0).get(0);
-        Ok(Some(prefix))
-    } else { unreachable!() }
-}
-
-fn inner_dynamic_prefix(
-    context: &Context,
-    message: &Message,
-) -> Result<Option<String>, CetrizineError> {
-    if let Some(guild_id) = message.guild_id {
-        // I'd like to put this in a cache, but premature
-        // optimization is the root of all evil.
-        Ok(get_guild_prefix(&context.get_pool_arc(), guild_id)?)
-    } else {
-        Ok(None)
+command_log!(
+    #[aliases("prefix", "get prefix", "getprefix", "p")]
+    fn get_prefix(ctx, message) {
+        if let Some(guild_id) = message.guild_id {
+            // I'd like to put this in a cache, but premature
+            // optimization is the root of all evil.
+            match get_guild_prefix(&Arc::clone(ctx.data.read().get::<PoolArcKey>().unwrap()), guild_id)? {
+                Some(res) => message.reply(&ctx, &format!("Prefix is currently {:?}", res))?,
+                None => message.reply(&ctx, "Prefix is currently unset")?,
+            };
+        } else {
+            message.reply(&ctx, "Prefix can only be set in guilds.")?;
+        }
+        Ok(())
     }
-}
+);
 
-command_log!(get_prefix(context, message) {
-    if let Some(guild_id) = message.guild_id {
-        // I'd like to put this in a cache, but premature
-        // optimization is the root of all evil.
-        match get_guild_prefix(&Arc::clone(context.data.lock().get::<PoolArcKey>().unwrap()), guild_id)? {
-            Some(res) => message.reply(&format!("Prefix is currently {:?}", res))?,
-            None => message.reply("Prefix is currently unset")?,
-        };
-    } else {
-        message.reply("Prefix can only be set in guilds.")?;
-    }
-    Ok(())
-});
 
-command_log!(help_info(context, message) {
-    let reply_text = format!(
-        "
+command_log!(
+    #[aliases("help", "info", "\u{2139}", "\u{2139}\u{fe0f}")]
+    fn help_info(ctx, message) {
+        let reply_text = format!(
+            "
 {0} {1}
 Commands:
 {2}ping - Play table tennis
@@ -398,45 +495,45 @@ Note: You can always perform commands by pinging this bot at the beginning, eg:
 App icon based on <https://icons8.com/icon/114217/floppy-disk>
 
 This {0} has Super Pony Powers",
-        some_kind_of_uppercase_first_letter(env!("CARGO_PKG_NAME")),
-        env!("CARGO_PKG_VERSION"),
-        inner_dynamic_prefix(&context, message)?.unwrap_or_else(String::new),
-        USER_ID.load(Ordering::Relaxed),
-    );
-    message.channel_id.send_message(|m| m.content(&reply_text))?;
-    Ok(())
-});
-
-command_log!(ping(_context, message) {
-    message.reply("Pong!")?;
-    Ok(())
-});
-
-command_log!(set_prefix(context, message, args) {
-    let guild_id = match message.guild_id {
-        None => {
-            message.reply("Cannot set prefix in private messages. No prefix needed!")?;
-            return Ok(())
-        },
-        Some(id) => id
-    };
-    let new_prefix:String = args.rest().into();
-    let conn = context.get_pool_arc().get()?;
-    if new_prefix.is_empty() {
-        conn.execute(
-            "DELETE FROM guild_prefixes WHERE guild_id = $1",
-            &[&i64::from(guild_id)]
-        )?;
-        message.reply("Prefix unset, use at-mention to execute commands")?;
-    } else {
-        conn.execute(
-            "INSERT INTO guild_prefixes (guild_id, command_prefix) VALUES ($1, $2) ON CONFLICT (guild_id) DO UPDATE SET command_prefix = $2",
-            &[
-                &SmartHax(guild_id),
-                &new_prefix,
-            ],
-        )?;
-        message.reply(&format!("Prefix set to {:?}.",new_prefix))?;
+            some_kind_of_uppercase_first_letter(env!("CARGO_PKG_NAME")),
+            env!("CARGO_PKG_VERSION"),
+            inner_dynamic_prefix(&ctx, message)?.unwrap_or_else(String::new),
+            USER_ID.load(Ordering::Relaxed),
+        );
+        message.channel_id.send_message(&ctx, |m| m.content(&reply_text))?;
+        Ok(())
     }
-    Ok(())
-});
+);
+
+command_log!(
+    #[aliases("setprefix", "set prefix", "sp")]
+    fn set_prefix(ctx, message, args) {
+        let guild_id = match message.guild_id {
+            None => {
+                message.reply(&ctx, "Cannot set prefix in private messages. No prefix needed!")?;
+                return Ok(())
+            },
+            Some(id) => id
+        };
+        let new_prefix:String = args.rest().into();
+        let conn = ctx.get_pool_arc().get()?;
+        if new_prefix.is_empty() {
+            conn.execute(
+                "DELETE FROM guild_prefixes WHERE guild_id = $1",
+                &[&i64::from(guild_id)]
+            )?;
+            message.reply(&ctx, "Prefix unset, use at-mention to execute commands")?;
+        } else {
+            conn.execute(
+                "INSERT INTO guild_prefixes (guild_id, command_prefix) VALUES ($1, $2) ON CONFLICT (guild_id) DO UPDATE SET command_prefix = $2",
+                &[
+                    &SmartHax(guild_id),
+                    &new_prefix,
+                ],
+            )?;
+            message.reply(&ctx, &format!("Prefix set to {:?}.",new_prefix))?;
+        }
+        Ok(())
+    }
+);
+/* */
