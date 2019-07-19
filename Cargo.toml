@@ -21,6 +21,8 @@ multi_log = "0.1"
 typemap = "0.3"
 lazy_static = "*"
 evmap = "^6.0"
+diesel = { version = "1.0.0", features = ["postgres","chrono","r2d2"] }
+dotenv = "0.9.0"
 
 [dependencies.rusqlite]
 version = "~0.18.0"

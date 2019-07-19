@@ -32,6 +32,7 @@ impl log::Log for PostgresLogger {
     }
 
     fn log(&self, record: &Record) {
+        use crate::schema::log_entry::dsl::*;
         if !self.enabled(record.metadata()) { return }
         let session_id = SESSION_ID.load(std::sync::atomic::Ordering::Relaxed);
         if session_id == 0 {
@@ -48,24 +49,19 @@ impl log::Log for PostgresLogger {
                 return;
             },
         }
-        let logging_result:pg::Result<()> = (|| {
-            the_conn.batch_execute("SET synchronous_commit TO 'off';")?;
-            pg_insert_helper!(
-                the_conn, "log_entry",
-                logged_at_datetime => time,
-                logged_at_duration_secs => duration.as_secs().try_into().unwrap():i64,
-                logged_at_duration_nanos => duration.subsec_nanos().try_into().unwrap():i32,
-                session_rowid => session_id,
-                log_level => record.level().into_str(),
-                target => record.target(),
-                module_path => record.module_path(),
-                file => record.file(),
-                line => record.line().map(|v|v.into():i64),
-                message_body => format!("{}",record.args()),
-            )?;
-            the_conn.batch_execute("SET synchronous_commit TO DEFAULT")?;
-            Ok(())
-        })();
+        let logging_result = diesel::insert_into(log_entry).values(
+            &NewLogEntry{
+                logged_at_datetime: time,
+                logged_at_duration_secs: duration.as_secs().try_into().unwrap():i64,
+                logged_at_duration_nanos: duration.subsec_nanos().try_into().unwrap():i32,
+                session_rowid: session_id,
+                log_level: record.level().into_str(),
+                target: record.target(),
+                module_path: record.module_path(),
+                file: record.file(),
+                line: record.line().map(i64::from),
+            }
+        ).execute(the_conn);
         match logging_result {
             Ok(_) => (),
             Err(why) => error!(target: INTERNAL_LOG_TARGET, "Failed to insert log entry: {:?}", why),
@@ -74,3 +70,21 @@ impl log::Log for PostgresLogger {
 
     fn flush(&self) {}
 }
+
+use crate::schema::log_entry;
+
+#[derive(Insertable)]
+#[table_name="log_entry"]
+struct NewLogEntry {
+    logged_at_datetime: chrono::DateTime<chrono::Utc>,
+    logged_at_duration_secs: i64,
+    logged_at_duration_nanos: i32,
+    session_rowid: i64,
+    log_level: String,
+    target: String,
+    module_path: Option<String>,
+    file: Option<String>,
+    line: Option<i64>,
+    message_body: String,
+}
+    

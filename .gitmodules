@@ -4,3 +4,6 @@
 [submodule "coral"]
 	path = coral
 	url = ../coral
+[submodule "rust-diesel-derive"]
+	path = rust-diesel-derive
+	url = ../rust-diesel-derive
