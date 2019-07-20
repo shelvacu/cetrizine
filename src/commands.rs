@@ -46,20 +46,16 @@ fn some_kind_of_uppercase_first_letter(s: &str) -> String {
 }
 
 fn get_guild_prefix(
-    pool: &Arc<r2d2::Pool<r2d2_postgres::PostgresConnectionManager>>,
+    pool: &Arc<r2d2::Pool<diesel::r2d2::ConnectionManager<diesel::pg::PgConnection>>>,
     guild_id: GuildId
 ) -> Result<Option<String>,CetrizineError> {
+    use crate::schema::guild_prefixes::dsl;
     let conn = pool.get()?;
-    let rows = conn.query(
-        "SELECT command_prefix FROM guild_prefixes WHERE guild_id = $1",
-        &[&i64::from(guild_id)]
-    )?;
-    if rows.is_empty() {
-        Ok(None)
-    } else if rows.len() == 1 {
-        let prefix:String = rows.get(0).get(0);
-        Ok(Some(prefix))
-    } else { unreachable!() }
+    dsl::guild_prefixes
+        .filter(dsl::guild_id.eq(i64::from(guild_id)))
+        .select(dsl::command_prefix)
+        .get_result(&conn)
+        .optional()?
 }
 
 fn inner_dynamic_prefix(

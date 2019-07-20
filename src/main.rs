@@ -1,6 +1,6 @@
 #![feature(nll,const_slice_len,option_flattening,type_ascription,param_attrs)]
 #![deny(unused_must_use)]
-#![allow(clippy::mutex_atomic)]
+#![allow(clippy::mutex_atomic,unused_imports,non_camel_case_types)]
 #![recursion_limit="1024"]
 
 #[macro_use]
@@ -77,13 +77,14 @@ use std::ffi::OsString;
 macro_rules! pg_insert_helper {
     ( $db:ident, $table_name:ident, $( $column_name:ident => $column_value:expr , )+ ) => {{
         use schema::$table_name::dsl;
-        diesel::insert(dsl::$table_name)
+        diesel::insert_into(dsl::$table_name)
             .values((
                 $(
                     dsl::$column_name.eq($column_value),
                 )+
             ))
-            .execute(&$db)
+            .returning(dsl::rowid)
+            .get_result(&$db)
     }};
 }
 
@@ -109,6 +110,7 @@ mod command_log_macro;
 mod commands;
 
 use db_types::*;
+use diesel::prelude::*;
 
 #[allow(clippy::unreadable_literal)]
 const DISCORD_MAX_SNOWFLAKE:u64 = 9223372036854775807; // (2^63)-1
@@ -125,7 +127,7 @@ lazy_static! {
 
 struct PoolArcKey;
 impl typemap::Key for PoolArcKey {
-    type Value = Arc<r2d2::Pool<diesel::r2d2::ConnectionManager>>;
+    type Value = Arc<r2d2::Pool<diesel::r2d2::ConnectionManager<diesel::pg::PgConnection>>>;
 }
 
 struct IsBotBoolKey;
@@ -139,12 +141,12 @@ impl typemap::Key for ShardManagerArcKey {
 }
 
 trait ContextExt {
-    fn get_pool_arc(&self) -> Arc<r2d2::Pool<diesel::r2d2::ConnectionManager>>;
+    fn get_pool_arc(&self) -> Arc<r2d2::Pool<diesel::r2d2::ConnectionManager<diesel::pg::PgConnection>>>;
     fn is_bot(&self) -> bool;
 }
 
 impl ContextExt for Context {
-    fn get_pool_arc(&self) -> Arc<r2d2::Pool<diesel::r2d2::ConnectionManager>> {
+    fn get_pool_arc(&self) -> Arc<r2d2::Pool<diesel::r2d2::ConnectionManager<diesel::pg::PgConnection>>> {
         Arc::clone(self.data.read().get::<PoolArcKey>().unwrap())
     }
 
@@ -328,12 +330,12 @@ fn get_last_message_id(chan:&Channel) -> Option<MessageId> {
     Ok(res)
 }*/
 
-fn make_synthetic_mag<C: diesel::pg::PgConnection>(c: &C, session_id_arg: i64, channel_id_arg: i64) -> Result<(), CetrizineError> {
+fn make_synthetic_mag(c: &diesel::pg::PgConnection, session_id_arg: i64, channel_id_arg: i64) -> Result<(), CetrizineError> {
     use schema::message_archive_gets::dsl;
     diesel::insert_into(dsl::message_archive_gets)
         .values((
             dsl::session_id.eq(session_id_arg),
-            dsl::channel_id.eq(channel_id_arg),
+            dsl::channel_id.eq(Snowflake(channel_id_arg)),
             dsl::synthetic.eq(true),
             dsl::finished.eq(false),
         ))
@@ -342,19 +344,19 @@ fn make_synthetic_mag<C: diesel::pg::PgConnection>(c: &C, session_id_arg: i64, c
     Ok(())
 }
 
-fn set_after_message_id<C: diesel::pg::PgConnection>(c: &C, session_id_arg: i64, channel_id_arg: ChannelId, maybe_last_message_id: Option<MessageId>) -> Result<(), CetrizineError> {
+fn set_after_message_id(c: &diesel::pg::PgConnection, session_id_arg: i64, channel_id_arg: ChannelId, maybe_last_message_id: Option<MessageId>) -> Result<(), CetrizineError> {
     use schema::message_archive_gets::dsl;
-    make_synthetic_mag(c, session_id, channel_id.get_snowflake_i64())?;
+    make_synthetic_mag(c, session_id_arg, channel_id_arg.get_snowflake_i64())?;
     if let Some(last_message_id) = maybe_last_message_id {
         diesel::update(
-            dsl::message_archive_gets.filter((
-                dsl::session_id.eq(session_id_arg),
-                dsl::channel_id.eq(channel_id.get_snowflake_i64()),
-                dsl::synthetic.eq(true),
-                dsl::after_message_id.is_null(),
-            ))
+            dsl::message_archive_gets.filter(
+                dsl::session_id.eq(session_id_arg)
+                .and(dsl::channel_id.eq(Snowflake::from(channel_id_arg)))
+                .and(dsl::synthetic.eq(true))
+                .and(dsl::after_message_id.is_null())
+            )
         ).set(
-            dsl::after_message_id.eq(last_message_id)
+            dsl::after_message_id.eq(Snowflake::from(last_message_id))
         ).execute(c)?;
     }
     Ok(())
@@ -426,7 +428,7 @@ impl Handler {
         let recvd_duration = ev.happened_at_instant - self.beginning_of_time;
         let msg_type_str = ev.data.into_str();
         let (msg_content_text, msg_content_binary) = ev.data.into_two_data();
-        diesel::insert(dsl::raw_message)
+        diesel::insert_into(dsl::raw_message)
             .values((
                 dsl::recvd_at_datetime.eq(ev.happened_at_chrono),
                 dsl::recvd_at_duration_secs.eq(recvd_duration.as_secs().try_into().unwrap():i64),
@@ -436,7 +438,7 @@ impl Handler {
                 dsl::content_text.eq(msg_content_text),
                 dsl::content_binary.eq(msg_content_binary),
             ))
-            .execute()?;
+            .execute(&conn)?;
         trace!(
             "Inserted raw message {}, {}, {}, {}",
             &ev.happened_at_chrono,
@@ -461,7 +463,7 @@ impl Handler {
             &self.session_id,
         );
 
-        let guild_create_event_rowid = diesel::insert(dsl::guild_create_event)
+        let guild_create_event_rowid = diesel::insert_into(dsl::guild_create_event)
             .values((
                 dsl::is_new.eq(is_new),
                 dsl::recvd_at_datetime.eq(ev.happened_at_chrono),
@@ -488,6 +490,12 @@ impl Handler {
 
     fn ready_result(&self, ctx: Context, ready: Ready) -> Result<(), CetrizineError> {
         use schema::ready::dsl;
+        use diesel::sql_types::BigInt;
+        #[derive(Debug,QueryableByName)]
+        struct StupidStruct {
+            #[sql_type = "BigInt"]
+            count: i64,
+        }
         USER_ID.store(ready.user.id.0, Ordering::Relaxed);
         info!("Ready event received. Connected as: {}", &ready.user.name);
         if let Ok(val) = std::env::var("RE_EXECD") {
@@ -516,9 +524,10 @@ impl Handler {
             ctx.shard.set_status(OnlineStatus::Idle)
         }
 
-        let count_that_should_be_zero:i64 = diesel::sql_query(
-            "SELECT COUNT(*) FROM ready WHERE ((user_info).inner_user).discord_id != $1;"
-        ).bind(i64::from(ready.user.id)).get_result(&conn);
+        let count_that_should_be_zero:StupidStruct = diesel::sql_query(
+            "SELECT COUNT(*) as count FROM ready WHERE ((user_info).inner_user).discord_id != $1;"
+        ).bind::<BigInt,_>(i64::from(ready.user.id)).get_result(&conn)?;
+        let count_that_should_be_zero = count_that_should_be_zero.count;
 
         if count_that_should_be_zero != 0 {
             panic!("Error: you should always log in with the same user for the same database! Found ready with differing user id (current user is id {} aka {}#{})",ready.user.id.0,ready.user.name,ready.user.discriminator);
@@ -542,7 +551,7 @@ impl Handler {
             
     fn archive_message(conn: &diesel::pg::PgConnection, msg: &Message, recvd_at:DateTime<Utc>) -> Result<(), CetrizineError> {
         conn.transaction(|| {
-            pg_insert_helper!(
+            let message_rowid = pg_insert_helper!(
                 conn, message,
                 discord_id => SmartHax(msg.id),
                 author => DbDiscordUser::from(msg.author.clone()),
@@ -563,8 +572,6 @@ impl Handler {
                 archive_recvd_at => recvd_at,
             )?;
 
-            let message_rowid = pg_sequence_currval(tx, "message", "rowid")?;
-
             //attachments
             for attachment in &msg.attachments {
                 pg_insert_helper!(
@@ -582,7 +589,7 @@ impl Handler {
 
             //embeds
             for embed in &msg.embeds {
-                pg_insert_helper!(
+                let embed_rowid = pg_insert_helper!(
                     conn, embed,
                     message_rowid => message_rowid,
                     author => embed.author.clone().map(DbEmbedAuthor::from),
@@ -598,8 +605,6 @@ impl Handler {
                     url => embed.url.filter_null(),
                     video => embed.video.clone().map(DbEmbedVideo::from),
                 )?;
-
-                let embed_rowid = pg_sequence_currval(tx, "embed", "rowid")?;
 
                 //insert embed fields
                 for embed_field in &embed.fields {
@@ -641,7 +646,12 @@ impl Handler {
     }
 
     //guild_name is used purely for the pretty output and debug messages
-    fn grab_channel_archive<C: diesel::pg::PgConnection>(http: impl AsRef<serenity::http::raw::Http>, conn: &C, chan: &Channel, guild_name: String) -> Result<(), CetrizineError> {
+    fn grab_channel_archive(
+        http: impl AsRef<serenity::http::raw::Http>,
+        conn: &diesel::pg::PgConnection,
+        chan: &Channel,
+        guild_name: String
+    ) -> Result<(), CetrizineError> {
         use schema::message_archive_gets::dsl;
         let name = get_name(chan);
         info!("ARCHIVING CHAN {}#{} (id {})", &guild_name, &name, &chan.id());
@@ -879,8 +889,8 @@ ORDER BY start_message_id ASC LIMIT 1;",
         }
     }
 
-    fn archive_guild<C: diesel::pg::PgConnection>(
-        conn: &C,
+    fn archive_guild(
+        conn: &diesel::pg::PgConnection,
         ctx: &Context,
         guild: &Guild,
         parent_rowid: GuildParentId,
@@ -891,7 +901,7 @@ ORDER BY start_message_id ASC LIMIT 1;",
         let raw_event = ctx.raw_event.as_ref().unwrap();
         let tx = conn.transaction()?;
 
-        pg_insert_helper!(
+        let guild_rowid = pg_insert_helper!(
             tx, guild,
             ready_rowid => parent_rowid.as_ready(),
             guild_create_event_rowid => parent_rowid.as_create_event(),
@@ -914,9 +924,7 @@ ORDER BY start_message_id ASC LIMIT 1;",
             system_channel_id => SmartHax(guild.system_channel_id),
             verification_level => guild.verification_level.into_str(),
             archive_recvd_at => raw_event.happened_at_chrono,
-        )?;            
-
-        let guild_rowid = pg_sequence_currval(&tx, "guild", "rowid")?;
+        )?;
 
         let mut guild_channels = Vec::<(ChannelId,i64)>::new();
 
@@ -924,7 +932,7 @@ ORDER BY start_message_id ASC LIMIT 1;",
         for chan_a_lock in guild.channels.values() {
             let chan = chan_a_lock.read();
 
-            pg_insert_helper!(
+            let chan_rowid = pg_insert_helper!(
                 tx, guild_channel,
                 discord_id => SmartHax(chan.id),
                 guild_rowid => guild_rowid,
@@ -940,8 +948,6 @@ ORDER BY start_message_id ASC LIMIT 1;",
                 user_limit => chan.user_limit.map(|u| u.try_into().unwrap():i64),
                 nsfw => chan.nsfw,
             )?;
-
-            let chan_rowid = pg_sequence_currval(&tx, "guild_channel", "rowid")?;
 
             set_after_message_id(&tx, session_id, chan.id, chan.last_message_id)?;
             guild_channels.push((chan.id, chan_rowid));
@@ -1077,8 +1083,8 @@ ORDER BY start_message_id ASC LIMIT 1;",
     }
     
     /// This fn will block until it appears that all previous messages have been retrieved. Caller should probably be run in another thread.
-    fn grab_full_archive<C: diesel::pg::PgConnection>(
-        conn: &C,
+    fn grab_full_archive(
+        conn: &diesel::pg::PgConnection,
         ctx: Context,
         rdy: Ready,
         channel_archiver_sender: Sender<(Channel, String)>,
@@ -1086,7 +1092,7 @@ ORDER BY start_message_id ASC LIMIT 1;",
     ) -> Result<(), CetrizineError> {
         let tx = conn.transaction()?;
 
-        pg_insert_helper!(
+        let ready_rowid = pg_insert_helper!(
             tx, ready,
             session_id => rdy.session_id.filter_null(),
             shard => rdy.shard.map(|a| vec![
@@ -1097,8 +1103,6 @@ ORDER BY start_message_id ASC LIMIT 1;",
             user_info => DbSerenityCurrentUser::from(rdy.user.clone()),
             version => rdy.version.try_into().unwrap():i64,
         )?;
-
-        let ready_rowid = pg_sequence_currval(&tx, "ready", "rowid")?;
 
         //presences
         for presence in rdy.presences.values() {            
@@ -1475,13 +1479,15 @@ DB migration version: {}",
         {
             let setup_conn = pool.get().unwrap();
             if init_db {
-                let tx = setup_conn.transaction().unwrap();
-                tx.batch_execute(migrations::DB_INIT_SQL).unwrap();
-                pg_insert_helper!(
-                    tx, migration_version,
-                    version => 7i64,
-                ).unwrap();
-                tx.commit().unwrap();
+                use schema::migration_version::dsl;
+                setup_conn.transaction(||{
+                    setup_conn.batch_execute(migrations::DB_INIT_SQL).unwrap();
+                    diesel::insert_into(dsl::migration_version)
+                        .values(
+                            dsl::version.eq(7i64)
+                        )
+                        .execute(&setup_conn).unwrap();
+                }).unwrap();
             }
             if migrate_only || init_db || !no_auto_migrate {
                 migrations::do_postgres_migrate(&*setup_conn);
@@ -1490,7 +1496,7 @@ DB migration version: {}",
                 panic!("Migration version mismatch, no auto migrate, aborting.");
             }
 
-            pg_insert_helper!(
+            session_id = pg_insert_helper!(
                 setup_conn, run_session,
                 started_at => started_at,
                 pkg_name => env!("CARGO_PKG_NAME"),
@@ -1500,8 +1506,6 @@ DB migration version: {}",
                 git_sha_ref => env!("VERGEN_SHA"),
                 git_commit_date => env!("VERGEN_COMMIT_DATE"),
             ).unwrap();
-
-            session_id = pg_sequence_currval(&*setup_conn, "run_session", "rowid").unwrap();
         }
 
         SESSION_ID.store(session_id, Ordering::Relaxed);
