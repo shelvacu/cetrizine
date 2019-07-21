@@ -9,7 +9,6 @@ use crate::{
     r2d2,
     r2d2_postgres,
     diesel::prelude::*,
-//    command_log_macro,
 };
 use serenity::{
     model::prelude::*,
@@ -19,8 +18,6 @@ use serenity::{
         CommandResult,
         Args,
         macros::{command, group},
-        //help_commands,
-        //CommandOptions,
     }
 };
 
@@ -97,6 +94,7 @@ group!({
     name: "default",
     options: {},
     commands: [
+        pony,
         ping,
         set_prefix,
         get_prefix,
@@ -104,7 +102,6 @@ group!({
         binary,
         binary_en,
         binary_de,
-        pony,
         horse,
         invite_url,
     ],
@@ -122,17 +119,6 @@ group!({
     ],
 });
 
-#[command]
-#[aliases("🏓")]
-fn ping ( ctx : & mut Context , message : & Message , _args : Args ) -> CommandResult {
-    let res : Result < (  ) , CetrizineError > =
-    { message.reply(ctx, "Pong!")?; Ok(()) } ;
-    log_any_error ! ( res ) ;
-    Ok(())
-}
-
-/*
-trace_macros!(true);
 command_log!(
     #[alias("Ping!", "🏓")]
     fn ping(ctx, message) {
@@ -140,85 +126,6 @@ command_log!(
         Ok(())
     }
 );
-trace_macros!(false);
-*/
-
-/*
-pub fn cetrizine_framework() -> StandardFramework {
-    let owners = vec![
-        #[allow(clippy::unreadable_literal)] //This literal isn't meant to be read, it's an ID
-        UserId(165858230327574528)
-    ].into_iter().collect();
-    StandardFramework::new()
-        .configure(
-            |c| c
-                .dynamic_prefix(move |context, message| {
-                    log_any_error!(inner_dynamic_prefix(context, message)).flatten()
-                })
-                .allow_whitespace(true)
-                .on_mention(true)
-                .no_dm_prefix(true)
-                .owners(owners)
-        )
-        .on_dispatch_error(|_, msg, error| {
-            debug!("Dispatch error. msg: {:?}, error: {:?}", msg, error);
-        })
-        .unrecognised_command(|_, msg, name| {
-            debug!("Unrecognized command {:?} {:?}", msg, name);
-        })
-        .cmd("ping", ping)
-        .cmd("Ping!", ping)
-        .cmd("🏓", ping) //table tennis paddle
-        .cmd("setprefix", set_prefix)
-        .cmd("set prefix", set_prefix)
-        .cmd("set_prefix", set_prefix)
-        .cmd("sp", set_prefix)
-        .cmd("prefix", get_prefix)
-        .cmd("get_prefix", get_prefix)
-        .cmd("get prefix", get_prefix)
-        .cmd("getprefix", get_prefix)
-        .cmd("p", get_prefix)
-        .cmd("info", help_info)
-        .cmd("help", help_info)
-        .cmd("\u{2139}", help_info) //information
-        .cmd("\u{2139}\u{fe0f}", help_info) //information
-        .cmd("binary", binary)
-        .cmd("b", binary)
-        .cmd("binarydecode", binary_de)
-        .cmd("bd", binary_de)
-        .cmd("binaryencode", binary_en)
-        .cmd("be", binary_en)
-        .cmd("pony", pony)
-        .cmd("horse", horse)
-        .cmd("invite url", invite_url)
-        .cmd("invite_url", invite_url)
-        .cmd("invite", invite_url)
-        .cmd("inv", invite_url)
-        .command(
-            "r&r",
-            |c| c
-                .owners_only(true)
-                .cmd(recompile_and_run)
-        )
-        .command(
-            "restartshard",
-            |c| c
-                .owners_only(true)
-                .cmd(restart_shard)
-        )
-        .command(
-            "sendraw",
-            |c| c
-                .owners_only(true)
-                .cmd(send_raw)
-        )
-        .command(
-            "restart",
-            |c| c
-                .owners_only(true)
-                .cmd(restart_bot)
-        )
-}*/
 
 command_log!(
     #[aliases("invite url", "invite", "inv")]
@@ -249,14 +156,6 @@ command_log!(
         Ok(())
     }
 );
-
-/*command_log!(
-    #[aliases("restartshard")]
-    fn restart_shard(context) {
-        context.shard.shutdown_clean();
-        Ok(())
-    }
-);*/
 
 command_log!(
     #[aliases("restart")]
@@ -465,7 +364,7 @@ command_log!(
                 None => message.reply(&ctx, "Prefix is currently unset")?,
             };
         } else {
-            message.reply(&ctx, "Prefix can only be set in guilds.")?;
+            message.reply(&ctx, "No prefix needed for private messages")?;
         }
         Ok(())
     }
@@ -482,7 +381,7 @@ Commands:
 {2}ping - Play table tennis
 {2}setprefix - Change the prefix that bot will use (shortcut: sp)
 {2}getprefix - Display the current prefix (shortcut: p)
-{2}binary - Convert between binary and text. Will try to \"guess\" \"\"intelligently\"\" what direction you're trying to go (shortcut: b)
+{2}binary - Convert between binary and text. Will try to guess \"\"intelligently\"\" what direction you're trying to go (shortcut: b)
 {2}binaryencode - Convert from text to binary (shortcut: be)
 {2}binarydecode - Convert from binary to text (shortcut: bd)
 {2}help - Display this message (also: info)
@@ -522,10 +421,6 @@ command_log!(
                     dsl::guild_id.eq(SmartHax(guild_id))
                 )
             ).execute(&conn)?;
-            /*conn.execute(
-                "DELETE FROM guild_prefixes WHERE guild_id = $1",
-                &[&i64::from(guild_id)]
-            )?;*/
             message.reply(&ctx, "Prefix unset, use at-mention to execute commands")?;
         } else {
             diesel::insert_into(
@@ -538,13 +433,6 @@ command_log!(
             ).do_update().set(
                 dsl::command_prefix.eq(&new_prefix),
             ).execute(&conn)?;
-            /*conn.execute(
-                "INSERT INTO guild_prefixes (guild_id, command_prefix) VALUES ($1, $2) ON CONFLICT (guild_id) DO UPDATE SET command_prefix = $2",
-                &[
-                    &SmartHax(guild_id),
-                    &new_prefix,
-                ],
-            )?;*/
             message.reply(&ctx, &format!("Prefix set to {:?}.",new_prefix))?;
         }
         Ok(())

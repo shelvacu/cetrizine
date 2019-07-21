@@ -1,7 +1,6 @@
 use crate::serenity::model::prelude::*;
 use crate::serenity::client::bridge::gateway::ShardId;
 use crate::serenity::utils::Colour;
-//use crate::pg::types::{IsNull,Type,ToSql,FromSql};
 use crate::diesel::{
     sql_types::*,
     backend::Backend,
@@ -15,22 +14,6 @@ use crate::EnumIntoString;
 use std::error::Error;
 use std::fmt::Debug;
 use std::io::Write;
-
-/*trait StrExt {
-    fn filter_null(&self) -> Self;
-}
-
-impl StrExt for String {
-    fn filter_null(&self) -> String {
-        self.clone() //BAD IMPL! for testing
-    }
-}
-
-impl StrExt for Option<String> {
-    fn filter_null(&self) -> Option<String> {
-        self.clone() //BAD IMPL! for testing
-    }
-}*/
 
 pub trait InnerSnowflake {
     fn get_snowflake(&self) -> u64;
@@ -256,7 +239,7 @@ impl From<u32> for DiscordColour {
 }
 
 #[derive(Debug, SqlType)]
-#[postgres(type_name = "__t_discord_user")]
+#[postgres(type_name = "discord_user")]
 pub struct SQL_DiscordUser;
 
 composite_type! {
@@ -271,7 +254,7 @@ composite_type! {
 }
 
 #[derive(Debug, SqlType)]
-#[postgres(type_name = "__t_embed_author")]
+#[postgres(type_name = "embed_author")]
 pub struct SQL_EmbedAuthor;
 
 composite_type! {
@@ -285,7 +268,7 @@ composite_type! {
 }
 
 #[derive(Debug, SqlType)]
-#[postgres(type_name = "__t_embed_footer")]
+#[postgres(type_name = "embed_footer")]
 pub struct SQL_EmbedFooter;
 
 composite_type! {
@@ -298,7 +281,7 @@ composite_type! {
 }
 
 #[derive(Debug, SqlType)]
-#[postgres(type_name = "__t_embed_image")]
+#[postgres(type_name = "embed_image")]
 pub struct SQL_EmbedImage;
 
 composite_type! {
@@ -312,7 +295,7 @@ composite_type! {
 }
 
 #[derive(Debug, SqlType)]
-#[postgres(type_name = "__t_embed_provider")]
+#[postgres(type_name = "embed_provider")]
 pub struct SQL_EmbedProvider;
 
 composite_type! {
@@ -324,7 +307,7 @@ composite_type! {
 }
 
 #[derive(Debug, SqlType)]
-#[postgres(type_name = "__t_embed_video")]
+#[postgres(type_name = "embed_video")]
 pub struct SQL_EmbedVideo;
 
 composite_type! {
@@ -337,7 +320,7 @@ composite_type! {
 }
 
 #[derive(Debug, SqlType)]
-#[postgres(type_name = "__t_moment")]
+#[postgres(type_name = "moment")]
 pub struct SQL_Moment;
 
 composite_type! {
@@ -351,7 +334,7 @@ composite_type! {
 }
 
 #[derive(Debug, SqlType)]
-#[postgres(type_name = "__t_partial_member")]
+#[postgres(type_name = "partial_member")]
 pub struct SQL_PartialMember;
 
 composite_type! {
@@ -365,7 +348,7 @@ composite_type! {
 }
 
 #[derive(Debug, SqlType)]
-#[postgres(type_name = "__t_serenity_current_user")]
+#[postgres(type_name = "serenity_current_user")]
 pub struct SQL_SerenityCurrentUser;
 
 composite_type! {
@@ -379,7 +362,7 @@ composite_type! {
 }
 
 #[derive(Debug, SqlType)]
-#[postgres(type_name = "__t_user_presence_game")]
+#[postgres(type_name = "user_presence_game")]
 pub struct SQL_UserPresenceGame;
 
 composite_type! {
@@ -390,39 +373,6 @@ composite_type! {
     name -> Text : String,
     url -> Nullable<Text> : Option<String>,
 }
-
-/*impl FromSql<SQL_DiscordUser, Pg> for DbDiscordUser {
-    fn from_sql(&self, bytes: Option<&[u8]>) -> deserialize::Result<Self> {
-        let (
-        let bytes = not_none!(bytes);
-
-        let fixed_types_len = PG_UUID_BYTE_LEN;
-        let amount_len = bytes.len() - fixed_types_len;
-
-        let amount = &bytes[0..(amount_len - 1)];
-        let currency = &bytes[amount_len..];
-
-        Ok(Entry {
-            amount: FromSql::<sql_types::Decimal, Pg>::from_sql(Some(amount))?,
-            currency: FromSql::<sql_types::Uuid, Pg>::from_sql(Some(currency))?,
-        })
-    }
-}*/
-
-/*#[derive(Clone,Debug,ToSql,FromSql)]
-#[postgres(name = "__t_discord_user")]
-pub struct DbDiscordUserInner {
-    pub discord_id: DbSnowflake,
-    pub avatar: Option<String>,
-    pub is_bot: bool,
-    pub discriminator: i16,
-    #[postgres(name = "user_name")]
-    pub name: String,
-}
-
-#[derive(Clone,Debug,ToSql,FromSql)]
-#[postgres(name = "discord_user")]
-pub struct DbDiscordUser(pub DbDiscordUserInner);*/
 
 impl From<User> for DbDiscordUser {
     fn from(u:User) -> Self {
