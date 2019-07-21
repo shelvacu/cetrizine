@@ -1,6 +1,9 @@
 // Emacs just can't handle this syntax, fucks up the tabbing of everything after it so I put it in a separate file.
 
 macro_rules! command_log {
+    ($(#[$m:meta])* fn $fname:ident() $b:block) => {
+        command_log!($(#[$m])* fn $fname(_ctx, _msg, _args) $b);
+    };
     ($(#[$m:meta])* fn $fname:ident($ctx_arg:ident) $b:block) => {
         command_log!($(#[$m])* fn $fname($ctx_arg, _msg, _args) $b);
     };

@@ -1,3 +1,5 @@
+use crate::diesel::prelude::*;
+
 use std::convert::TryInto;
 
 enum MigrationSpec {
@@ -30,12 +32,13 @@ pub const DB_INIT_SQL:&str = include_str!("../postgres_init.sql");
 
 #[derive(Debug,Queryable)]
 pub struct MigrationVersion {
-    version: i64
+    version: i64,
 }
 
 pub fn get_migration_version(conn: &diesel::pg::PgConnection) -> i64 {
     use crate::schema::migration_version::dsl;
-    dsl::migration_version.limit(1).load::<MigrationVersion>(conn).unwrap()[0].version
+
+    dsl::migration_version.select(dsl::version).limit(1).get_result(conn).unwrap():i64
     //conn.query("SELECT version FROM migration_version LIMIT 1", &[]).unwrap().get(0).get(0)
 }
 
@@ -57,17 +60,19 @@ pub fn do_postgres_migrate(conn: &diesel::pg::PgConnection) {
             Normal(sql_str) => {
                 info!("Running migration v{} => v{}", mv, mv+1);
                 conn.transaction(|| {
+                    use crate::diesel::connection::SimpleConnection;
                     conn.batch_execute(sql_str).unwrap();
                     let updated =
                         diesel::update(
                             migration_version.filter(version.eq(mv.try_into().unwrap():i64))
                         )
                         .set(version.eq((mv+1).try_into().unwrap():i64))
-                        .execute().unwrap();
+                        .execute(conn).unwrap();
                     if updated != 1 {
                         panic!("Failed to set migration_version");
                     }
-                });
+                    Ok(()):Result<(),crate::diesel::result::Error>
+                }).unwrap();
                 info!("Finished migration v{} => v{}", mv, mv+1);
             }
         }

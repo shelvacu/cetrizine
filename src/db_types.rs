@@ -9,14 +9,14 @@ use crate::diesel::{
     deserialize::{self,FromSql},
     pg::Pg,
 };
-//use crate::FilterExt;
-//use crate::EnumIntoString;
+use crate::FilterExt;
+use crate::EnumIntoString;
 
 use std::error::Error;
 use std::fmt::Debug;
 use std::io::Write;
 
-trait StrExt {
+/*trait StrExt {
     fn filter_null(&self) -> Self;
 }
 
@@ -30,7 +30,7 @@ impl StrExt for Option<String> {
     fn filter_null(&self) -> Option<String> {
         self.clone() //BAD IMPL! for testing
     }
-}
+}*/
 
 pub trait InnerSnowflake {
     fn get_snowflake(&self) -> u64;
@@ -69,6 +69,13 @@ macro_rules! snowflake_impl {
                 *self.as_u64()
             }
         }
+
+        impl From<Snowflake> for $klass {
+            fn from(s: Snowflake) -> Self {
+                use std::convert::TryInto;
+                <Self as std::convert::From<u64>>::from(s.0.try_into().unwrap())
+            }
+        }
     };
 }
 
@@ -88,6 +95,34 @@ snowflake_impl!{WebhookId}
 #[derive(Debug,AsExpression)]
 #[sql_type = "BigInt"]
 #[sql_type = "SQL_Snowflake"]
+pub struct SmartHaxO<T: Debug>(pub Option<T>);
+
+
+impl<DB, T> ToSql<Int8, DB> for SmartHaxO<T>
+where
+    DB: Backend,
+    i64: ToSql<Int8, DB>,
+    T: InnerSnowflake + Debug,
+{
+    fn to_sql<W: Write>(&self, out: &mut Output<W, DB>) -> serialize::Result {
+        (self.0.as_ref().map(|a| a.get_snowflake_i64())).to_sql(out)
+    }
+}
+
+impl<DB, T> ToSql<SQL_Snowflake, DB> for SmartHaxO<T>
+where
+    DB: Backend,
+    i64: ToSql<Int8, DB>,
+    T: InnerSnowflake + Debug,
+{
+    fn to_sql<W: Write>(&self, out: &mut Output<W, DB>) -> serialize::Result {
+        (self.0.as_ref().map(|a| a.get_snowflake_i64())).to_sql(out)
+    }
+}
+
+#[derive(Debug,AsExpression)]
+#[sql_type = "BigInt"]
+#[sql_type = "SQL_Snowflake"]
 pub struct SmartHax<T: Debug>(pub T);
 
 
@@ -102,17 +137,6 @@ where
     }
 }
 
-/*impl<DB, T> ToSql<Nullable<Int8>, DB> for SmartHax<Option<T>>
-where
-    DB: Backend,
-    i64: ToSql<Int8, DB>,
-    T: InnerSnowflake + Debug,
-{
-    fn to_sql<W: Write>(&self, out: &mut Output<W, DB>) -> serialize::Result {
-        self.0.as_ref().map(|a| a.get_snowflake_i64()).to_sql(out)
-    }
-}*/
-
 impl<DB, T> ToSql<SQL_Snowflake, DB> for SmartHax<T>
 where
     DB: Backend,
@@ -124,7 +148,8 @@ where
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug,AsExpression)]
+#[sql_type = "BigInt"]
 pub struct PermsToSql(pub serenity::model::permissions::Permissions);
 
 impl<DB> ToSql<Int8, DB> for PermsToSql
@@ -171,11 +196,11 @@ macro_rules! composite_type {
     };
 }
 
-#[derive(Debug, SqlType)]
+#[derive(Debug, SqlType, QueryId)]
 #[postgres(type_name = "snowflake")]
 pub struct SQL_Snowflake;
 
-#[derive(Debug, FromSqlRow, AsExpression, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, FromSqlRow, AsExpression, PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
 #[sql_type = "SQL_Snowflake"]
 pub struct Snowflake(pub i64);
 
@@ -195,6 +220,12 @@ impl<T> From<T> for Snowflake
 where T: InnerSnowflake {
     fn from(val: T) -> Self {
         Self(val.get_snowflake_i64())
+    }
+}
+
+impl From<Snowflake> for i64 {
+    fn from(sf: Snowflake) -> Self {
+        sf.0
     }
 }
 
@@ -315,7 +346,7 @@ composite_type! {
     SQL_Moment, DbMoment,
     session_id -> Int8 : i64,
     duration_secs -> Int8 : i64,
-    duration_nanos -> Int8 : i64,
+    duration_nanos -> Int4 : i32,
     datetime -> Timestamptz : chrono::DateTime<chrono::Utc>,
 }
 
@@ -328,7 +359,7 @@ composite_type! {
     #[sql_type = "SQL_PartialMember"]
     SQL_PartialMember, DbPartialMember,
     deaf -> Bool : bool,
-    joined_at -> Timestamptz : chrono::DateTime<chrono::Utc>,
+    joined_at -> Nullable<Timestamptz> : Option<chrono::DateTime<chrono::Utc>>,
     mute -> Bool : bool,
     roles -> Array<SQL_Snowflake> : Vec<Snowflake>,
 }
@@ -473,7 +504,7 @@ impl From<EmbedVideo> for DbEmbedVideo {
         DbEmbedVideo{
             height: (ev.height as i64),
             width: (ev.width as i64),
-            url: ev.url.filter_null(),
+            url: Some(ev.url.filter_null()),
         }
     }
 }

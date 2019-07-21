@@ -5,20 +5,23 @@ use r2d2_postgres::r2d2;
 //use crate::chrono;
 //use crate::r2d2;
 use r2d2_postgres::PostgresConnectionManager;
+use crate::diesel::prelude::*;
 use super::EnumIntoString;
 use super::SESSION_ID;
 
 pub const INTERNAL_LOG_TARGET:&str = "postgres_logger_db";
 
+type DPool = r2d2::Pool<crate::diesel::r2d2::ConnectionManager<diesel::pg::PgConnection>>;
+
 pub struct PostgresLogger{
-    pool: r2d2::Pool<PostgresConnectionManager>,
+    pool: DPool,
     level: Level,
     b_o_t: std::time::Instant,
 }
 
 impl PostgresLogger {
     pub fn new(
-        pool: r2d2::Pool<PostgresConnectionManager>,
+        pool: DPool,
         level: Level,
         b_o_t: std::time::Instant
     ) -> Self {
@@ -60,8 +63,9 @@ impl log::Log for PostgresLogger {
                 module_path: record.module_path(),
                 file: record.file(),
                 line: record.line().map(i64::from),
+                message_body: format!("{}",record.args()),
             }
-        ).execute(the_conn);
+        ).execute(&the_conn);
         match logging_result {
             Ok(_) => (),
             Err(why) => error!(target: INTERNAL_LOG_TARGET, "Failed to insert log entry: {:?}", why),
@@ -75,15 +79,15 @@ use crate::schema::log_entry;
 
 #[derive(Insertable)]
 #[table_name="log_entry"]
-struct NewLogEntry {
+struct NewLogEntry<'a> {
     logged_at_datetime: chrono::DateTime<chrono::Utc>,
     logged_at_duration_secs: i64,
     logged_at_duration_nanos: i32,
     session_rowid: i64,
-    log_level: String,
-    target: String,
-    module_path: Option<String>,
-    file: Option<String>,
+    log_level: &'a str,
+    target: &'a str,
+    module_path: Option<&'a str>,
+    file: Option<&'a str>,
     line: Option<i64>,
     message_body: String,
 }

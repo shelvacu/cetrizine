@@ -8,6 +8,7 @@ use crate::{
     db_types::SmartHax,
     r2d2,
     r2d2_postgres,
+    diesel::prelude::*,
 //    command_log_macro,
 };
 use serenity::{
@@ -52,10 +53,11 @@ fn get_guild_prefix(
     use crate::schema::guild_prefixes::dsl;
     let conn = pool.get()?;
     dsl::guild_prefixes
-        .filter(dsl::guild_id.eq(i64::from(guild_id)))
+        .filter(dsl::guild_id.eq(SmartHax(guild_id)))
         .select(dsl::command_prefix)
         .get_result(&conn)
-        .optional()?
+        .optional()
+        .map_err(From::from)
 }
 
 fn inner_dynamic_prefix(
@@ -504,6 +506,7 @@ This {0} has Super Pony Powers",
 command_log!(
     #[aliases("setprefix", "set prefix", "sp")]
     fn set_prefix(ctx, message, args) {
+        use crate::schema::guild_prefixes::dsl;
         let guild_id = match message.guild_id {
             None => {
                 message.reply(&ctx, "Cannot set prefix in private messages. No prefix needed!")?;
@@ -514,22 +517,36 @@ command_log!(
         let new_prefix:String = args.rest().into();
         let conn = ctx.get_pool_arc().get()?;
         if new_prefix.is_empty() {
-            conn.execute(
+            diesel::delete(
+                dsl::guild_prefixes.filter(
+                    dsl::guild_id.eq(SmartHax(guild_id))
+                )
+            ).execute(&conn)?;
+            /*conn.execute(
                 "DELETE FROM guild_prefixes WHERE guild_id = $1",
                 &[&i64::from(guild_id)]
-            )?;
+            )?;*/
             message.reply(&ctx, "Prefix unset, use at-mention to execute commands")?;
         } else {
-            conn.execute(
+            diesel::insert_into(
+                dsl::guild_prefixes
+            ).values((
+                dsl::guild_id.eq(SmartHax(guild_id)),
+                dsl::command_prefix.eq(&new_prefix),
+            )).on_conflict(
+                dsl::guild_id
+            ).do_update().set(
+                dsl::command_prefix.eq(&new_prefix),
+            ).execute(&conn)?;
+            /*conn.execute(
                 "INSERT INTO guild_prefixes (guild_id, command_prefix) VALUES ($1, $2) ON CONFLICT (guild_id) DO UPDATE SET command_prefix = $2",
                 &[
                     &SmartHax(guild_id),
                     &new_prefix,
                 ],
-            )?;
+            )?;*/
             message.reply(&ctx, &format!("Prefix set to {:?}.",new_prefix))?;
         }
         Ok(())
     }
 );
-/* */
