@@ -30,11 +30,6 @@ pub const CURRENT_MIGRATION_VERSION:usize = MIGRATIONS.len();
 
 pub const DB_INIT_SQL:&str = include_str!("../postgres_init.sql");
 
-#[derive(Debug,Queryable)]
-pub struct MigrationVersion {
-    version: i64,
-}
-
 pub fn get_migration_version(conn: &diesel::pg::PgConnection) -> i64 {
     use crate::schema::migration_version::dsl;
 
