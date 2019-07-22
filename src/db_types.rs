@@ -195,7 +195,7 @@ impl ToSql<SQL_Snowflake, Pg> for Snowflake {
 
 impl FromSql<SQL_Snowflake, Pg> for Snowflake {
     fn from_sql(bytes: Option<&[u8]>) -> deserialize::Result<Self> {
-        <i64 as FromSql::<Int8, Pg>>::from_sql(bytes).map(|v| Snowflake(v))
+        <i64 as FromSql::<Int8, Pg>>::from_sql(bytes).map(Snowflake)
     }
 }
 
@@ -228,7 +228,7 @@ impl ToSql<SQL_DiscordColour, Pg> for DiscordColour {
 
 impl FromSql<SQL_DiscordColour, Pg> for DiscordColour {
     fn from_sql(bytes: Option<&[u8]>) -> deserialize::Result<Self> {
-        <i64 as FromSql::<Int8, Pg>>::from_sql(bytes).map(|v| DiscordColour(v))
+        <i64 as FromSql::<Int8, Pg>>::from_sql(bytes).map(DiscordColour)
     }
 }
 

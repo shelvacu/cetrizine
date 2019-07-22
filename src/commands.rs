@@ -104,6 +104,7 @@ group!({
         binary_de,
         horse,
         invite_url,
+        test,
     ],
 });
 
@@ -119,9 +120,33 @@ group!({
     ],
 });
 
+#[command]
+fn test(ctx: &mut Context, msg: &Message, mut args: Args) -> CommandResult {
+    //let val:u64 = inner_test();
+    let mut reply = String::new();
+    reply.push_str(&format!("Args are {:?}\n", args));
+    reply.push_str(&format!("quoted current {:?}\n", args.quoted().current()));
+    reply.push_str(&format!("trimmed current {:?}\n", args.trimmed().current()));
+    reply.push_str(&format!("quoted trimmed current {:?}\n", args.trimmed().quoted().current()));
+
+    args.restore();
+    reply.push_str(&format!("rest {:?}\n", args.rest()));
+
+    args.restore();
+    reply.push_str(&format!("message {:?}\n", args.message()));
+
+    args.restore();
+    for arg in args.iter::<String>() {
+        reply.push_str(&format!("arg {:?}\n", arg));
+    }
+    msg.reply(ctx, &reply)?;
+    Ok(())
+}
+
 command_log!(
-    #[alias("Ping!", "🏓")]
+    #[aliases("Ping!", "🏓")]
     fn ping(ctx, message) {
+        //let val:i64 = 5u64;
         message.reply(ctx, "Pong!")?;
         Ok(())
     }
