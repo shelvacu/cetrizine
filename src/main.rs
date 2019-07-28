@@ -42,6 +42,13 @@ extern crate coral;
 //A map for per-channel mutexes. Somewhat overkill for what I need, but no other crate can have *many* readers at a time.
 extern crate evmap;
 
+//For grabbing files stored on discord's servers
+extern crate sha2;
+extern crate hex;
+extern crate reqwest;
+
+use sha2::{Sha256,Digest};
+
 use backtrace::Backtrace;
 
 use r2d2_postgres::r2d2;
@@ -108,6 +115,7 @@ mod postgres_logger;
 #[macro_use]
 mod command_log_macro;
 mod commands;
+mod attachments;
 
 use db_types::*;
 use diesel::prelude::*;
@@ -126,9 +134,12 @@ lazy_static! {
     static ref SENT_REBOOT_NOTIF:StdMutex<bool> = StdMutex::new(false);
 }
 
+type DBPool = r2d2::Pool<crate::diesel::r2d2::ConnectionManager<diesel::pg::PgConnection>>;
+type ArcPool = Arc<DBPool>;
+
 struct PoolArcKey;
 impl typemap::Key for PoolArcKey {
-    type Value = Arc<r2d2::Pool<diesel::r2d2::ConnectionManager<diesel::pg::PgConnection>>>;
+    type Value = ArcPool;
 }
 
 struct IsBotBoolKey;
@@ -141,18 +152,30 @@ impl typemap::Key for ShardManagerArcKey {
     type Value = Arc<Mutex<ShardManager>>;
 }
 
+struct NewAttachmentNotifSenderKey;
+impl typemap::Key for NewAttachmentNotifSenderKey {
+    type Value = Mutex<Sender<()>>;
+}
+
 trait ContextExt {
-    fn get_pool_arc(&self) -> Arc<r2d2::Pool<diesel::r2d2::ConnectionManager<diesel::pg::PgConnection>>>;
+    fn get_pool_arc(&self) -> ArcPool;
     fn is_bot(&self) -> bool;
+    fn get_attachment_sender(&self) -> Sender<()>;
 }
 
 impl ContextExt for Context {
-    fn get_pool_arc(&self) -> Arc<r2d2::Pool<diesel::r2d2::ConnectionManager<diesel::pg::PgConnection>>> {
+    fn get_pool_arc(&self) -> ArcPool {
         Arc::clone(self.data.read().get::<PoolArcKey>().unwrap())
     }
 
     fn is_bot(&self) -> bool {
         *self.data.read().get::<IsBotBoolKey>().unwrap()
+    }
+
+    fn get_attachment_sender(&self) -> Sender<()> {
+        let data_lock = self.data.read();
+        let lock = data_lock.get::<NewAttachmentNotifSenderKey>().unwrap().lock();
+        (&*lock).clone()
     }
 }    
 
@@ -384,6 +407,7 @@ pub enum CetrizineErrorType{
     Pool(r2d2::Error),
     Sql(diesel::result::Error),
     Serenity(serenity::Error),
+    Io(std::io::Error),
 }
 
 impl std::fmt::Display for CetrizineError {
@@ -399,6 +423,7 @@ impl std::error::Error for CetrizineError {
             Pool(e)     => Some(e),
             Sql(e)      => Some(e),
             Serenity(e) => Some(e),
+            Io(e)       => Some(e),
         }
     }
 }
@@ -418,6 +443,12 @@ impl From<serenity::Error> for CetrizineError {
 impl From<r2d2::Error> for CetrizineError {
     fn from(err: r2d2::Error) -> Self {
         CetrizineError::new(CetrizineErrorType::Pool(err))
+    }
+}
+
+impl From<std::io::Error> for CetrizineError {
+    fn from(err: std::io::Error) -> Self {
+        CetrizineError::new(CetrizineErrorType::Io(err))
     }
 }
 
@@ -685,7 +716,6 @@ impl Handler {
                         dsl::start_message_id.ge(Snowflake(last))
                     ).and(
                         dsl::end_message_id.le(Snowflake(last))
-                        //diesel::expression_methods::ExpressionMethods::ge(Snowflake(last).as_expression(),dsl::end_message_id)
                     )
                 ).or(dsl::around_message_id.eq(Snowflake(last)))
             ).and(
@@ -704,39 +734,10 @@ impl Handler {
             ).and(
                 dsl::message_count_received.lt(dsl::message_count_requested)
             ),
-        )).get_result(conn).optional()?;
-             
-        /*let rows = conn.query(
-            "
-SELECT
-  rowid,
-  end_message_id,
-  after_message_id,
-  (message_count_received < message_count_requested) 
-FROM message_archive_gets 
-WHERE 
-  (
-    (
-      start_message_id >= $1 AND $1 >= end_message_id
-    ) OR 
-    around_message_id = $1
-  ) 
-  AND 
-  channel_id = $2
-  AND
-  finished = true
-ORDER BY end_message_id ASC
-LIMIT 1;",
-            &[
-                &(last_msg_id.get_snowflake_i64()),
-                &(chan.id().get_snowflake_i64())
-            ]
-        )?;*/
-        
+        )).get_result(conn).optional()?;                      
         trace!("maybe_mag_data is {:?}",maybe_mag_data);
 
         let mut get_before = DISCORD_MAX_SNOWFLAKE;
-        //let mut after_message_id:Option<u64>;
         
         while let Some(mag_data) = maybe_mag_data {
             //the query includes `WHERE ... finished = true`, so because of constraint message_archive_gets_message_ids_check this must always be non-null in the database, so not None here
@@ -755,7 +756,6 @@ LIMIT 1;",
                             dsl::start_message_id.ge(Snowflake(last))
                         ).and(
                             dsl::end_message_id.lt(Snowflake(last))
-                            //diesel::expression_methods::ExpressionMethods::gt(Snowflake(last).as_expression(),dsl::end_message_id)
                         )
                     ).or(
                         dsl::before_message_id.eq(Snowflake(last))
@@ -765,9 +765,6 @@ LIMIT 1;",
                         ).and(
                             dsl::start_message_id.eq(mag_data.ami)
                         )
-                        /*if let Some(ami) = mag_data.ami {
-                            dsl::start_message_id.eq(ami)
-                        } else { false }*/
                     )
                 ).and(
                     dsl::channel_id.eq(SmartHax(chan.id()))
@@ -788,34 +785,6 @@ LIMIT 1;",
                     dsl::message_count_received.lt(dsl::message_count_requested)
                 ),
             )).get_result(conn).optional()?;
-            /*let rows = conn.query(
-                "SELECT rowid,end_message_id,after_message_id,(message_count_received < message_count_requested) FROM message_archive_gets WHERE (
-  ( start_message_id >= $1 AND $1 > end_message_id ) OR
-  before_message_id = $1 OR
-  ($2::int8 IS NOT NULL AND start_message_id = $2::int8)
-) AND channel_id = $3 AND rowid != $4 AND finished = true
-ORDER BY start_message_id ASC LIMIT 1;",
-                &[
-                    &(get_before.try_into().unwrap():i64),
-                    &(after_message_id.map(|u| u.try_into().unwrap():i64)),
-                    &(chan.id().get_snowflake_i64()),
-                    &res.0
-                ]
-            )?;
-            maybe_res =
-                if rows.is_empty() {
-                    None
-                } else if rows.len() == 1 {
-                    let r = rows.get(0);
-                    Some(
-                        (
-                            r.get(0),
-                            (r.get(1):i64).try_into().unwrap(),
-                            (r.get(2):Option<i64>).map(|i| i.try_into().unwrap()),
-                            (r.get(3):Option<bool>).unwrap_or(false),
-                        )
-                    )
-                } else { panic!("Query ending in LIMIT 1 did not return 0 or 1 rows.") };*/
             trace!("maybe_mag_data again is {:?}",maybe_mag_data);
         }
 
@@ -832,19 +801,6 @@ ORDER BY start_message_id ASC LIMIT 1;",
             )
         ).order(dsl::start_message_id.desc()).limit(1).select(dsl::start_message_id)
             .get_result(conn).optional()?.flatten().unwrap_or(Snowflake(0));
-        /*let rows = conn.query(
-            "SELECT start_message_id FROM message_archive_gets WHERE end_message_id < $1 AND channel_id = $2 AND finished = true ORDER BY start_message_id DESC LIMIT 1;",
-            &[
-                &(get_before.try_into().unwrap():i64),
-                &(chan.id().get_snowflake_i64())
-            ],
-        )?;
-        let gap_end =
-            if rows.is_empty() {
-                0i64
-            } else if rows.len() == 1 {
-                rows.get(0).get(0)
-            } else { panic!("Query ending in LIMIT 1 did not return 0 or 1 rows.") };*/
 
         trace!("gap_end is {:?}",gap_end);
         let mut earliest_message_recvd = get_before;
@@ -873,8 +829,6 @@ ORDER BY start_message_id ASC LIMIT 1;",
             });
             let msgs = msgs;
 
-            //let got_messages_mut = &mut got_messages;
-            //let tx = conn.transaction()?;
             let mut should_break = false;
             conn.transaction(|| {
                 for msg in &msgs {
@@ -888,45 +842,6 @@ ORDER BY start_message_id ASC LIMIT 1;",
                 let first_msg = msgs.first().expect("im a bad");
                 let last_msg  = msgs.last().expect("im a bad");
 
-                //DEBUG START
-                /*let already_archived_start:bool = tx.query(
-                "SELECT COUNT(*) FROM message_archive_gets WHERE (start_message_id >= $1 AND $1 >= end_message_id) AND channel_id = $2 AND rowid > 193737 AND finished = true",
-                &[
-                &(first_msg.id.get_snowflake_i64()),
-                &(chan.id().get_snowflake_i64())
-            ],
-            )?.get(0).get(0):i64 > 0;
-                let already_archived_end:bool = tx.query(
-                "SELECT COUNT(*) FROM message_archive_gets WHERE (start_message_id >= $1 AND $1 >= end_message_id) AND channel_id = $2 AND rowid > 193737 AND finished = true",
-                &[
-                &(last_msg.id.get_snowflake_i64()),
-                &(chan.id().get_snowflake_i64())
-            ],
-            )?.get(0).get(0):i64 > 0;
-                let already_archived_around:bool = tx.query(
-                "SELECT COUNT(*) FROM message_archive_gets WHERE (start_message_id >= $1 AND $1 >= end_message_id) AND channel_id = $2 AND rowid > 193737 AND finished = true",
-                &[
-                &(last_msg_id.get_snowflake_i64()),
-                &(chan.id().get_snowflake_i64())
-            ],
-            )?.get(0).get(0):i64 > 0;
-                let we_have_archived_this_before = already_archived_start && already_archived_end && (!around || already_archived_around);
-                if we_have_archived_this_before {
-                warn!(
-                "We've archived this before! chan id {} {} {} start {} end {} in {}#{}",
-                chan.id(),
-                if around {"around"} else {"before"},
-                if around {last_msg_id.0} else {earliest_message_recvd},
-                first_msg.id,
-                last_msg.id,
-                guild_name,
-                name
-            );
-                //std::process::exit(1);
-            }*/
-                //DEBUG END
-                
-                //TODO: put channel_rowid in there somwhere
                 pg_insert_helper!(
                     conn, message_archive_gets,
                     channel_id => SmartHax(chan.id()),
@@ -950,7 +865,6 @@ ORDER BY start_message_id ASC LIMIT 1;",
                 Ok(()):Result<(), CetrizineError>
             })?;
             if should_break { break; }
-            //tx.commit()?;
         } //while earliest_message_recvd > gap_end
         
         if got_messages {
@@ -1295,6 +1209,9 @@ ORDER BY start_message_id ASC LIMIT 1;",
         conn.transaction(|| {
             use schema::message_archive_gets::dsl;
             Self::archive_message(&conn, &msg, handler_start)?;
+            if !msg.attachments.is_empty() {
+                ctx.get_attachment_sender().send(()).unwrap();
+            }
             make_synthetic_mag(&conn, self.session_id, msg.channel_id.get_snowflake_i64())?;
             diesel::update(dsl::message_archive_gets.filter(
                 (
@@ -1668,6 +1585,23 @@ DB migration version: {}",
             }
         });
 
+        let (new_attachment_tx, new_attachment_rx) = std::sync::mpsc::channel::<()>();
+
+        let download_thread_arc_pool = Arc::clone(&arc_pool);
+        std::thread::spawn(move || {
+            loop {
+                while let Ok(()) = new_attachment_rx.try_recv() {}
+                info!("Starting archive_attachments thread");
+                log_any_error!(attachments::archive_attachments(
+                    &download_thread_arc_pool,
+                    session_id,
+                    beginning_of_time,
+                ));
+                info!("Finished archive_attachments thread");
+                new_attachment_rx.recv().unwrap();
+            }
+        });
+
         let is_bot = discord_token.starts_with("Bot ");
         if is_bot {
             info!("Detected bot token, running with commands enabled");
@@ -1683,6 +1617,7 @@ DB migration version: {}",
             data.insert::<IsBotBoolKey>(is_bot);
             let shard_manager_arc = Arc::clone(&client.shard_manager);
             data.insert::<ShardManagerArcKey>(shard_manager_arc);
+            data.insert::<NewAttachmentNotifSenderKey>(Mutex::new(new_attachment_tx));
         }
         
         client.start().expect("Error starting client");

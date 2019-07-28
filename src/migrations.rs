@@ -1,4 +1,5 @@
 use crate::diesel::prelude::*;
+use crate::diesel::sql_types::BigInt;
 
 use std::convert::TryInto;
 
@@ -24,6 +25,9 @@ const MIGRATIONS:&[MigrationSpec] = &[
     Normal(include_str!("migrations/11to12-previous-message.sql")), //11
     Normal(include_str!("migrations/12to13-migration-version-pkey.sql")), //12
     Normal(include_str!("migrations/13to14-sqlite-migration-progress-pkey.sql")), //13
+    Normal(include_str!("migrations/14to15-attachment-download.sql")), //14
+    Normal(include_str!("migrations/15to16-download-headers.sql")), //15
+    //SELECT MIN(a.rowid) as new_rowid, b.rowid as old_rowid, MAX(a.sha256sum_hex) FROM download_data as a, download_data as b WHERE a.sha256sum_hex = b.sha256sum_hex AND a.rowid < b.rowid GROUP BY b.rowid;
 ];
 
 pub const CURRENT_MIGRATION_VERSION:usize = MIGRATIONS.len();
@@ -57,6 +61,26 @@ pub fn do_postgres_migrate(conn: &diesel::pg::PgConnection) {
                 conn.transaction(|| {
                     use crate::diesel::connection::SimpleConnection;
                     conn.batch_execute(sql_str).unwrap();
+                    if mv == 15 {
+                        #[derive(QueryableByName,Debug,Clone,Copy)]
+                        struct NewOld {
+                            #[sql_type = "BigInt"]
+                            new_rowid: i64,
+                            #[sql_type = "BigInt"]
+                            old_rowid: i64,
+                        }
+                        let results:Vec<NewOld> = diesel::sql_query("SELECT MIN(a.rowid) as new_rowid, b.rowid as old_rowid FROM download_data as a, download_data as b WHERE a.sha256sum_hex = b.sha256sum_hex AND a.rowid < b.rowid GROUP BY b.rowid").load(conn).unwrap();
+                        info!("Found {} download_data duplicates", results.len());
+                        for res in results {
+                            diesel::sql_query("UPDATE download SET download_data_rowid = $1 WHERE download_data_rowid = $2")
+                                .bind::<BigInt,_>(res.new_rowid)
+                                .bind::<BigInt,_>(res.old_rowid)
+                                .execute(conn).unwrap();
+                            diesel::sql_query("DELETE FROM download_data WHERE rowid = $1")
+                                .bind::<BigInt,_>(res.old_rowid)
+                                .execute(conn).unwrap();
+                        }
+                    }
                     let updated =
                         diesel::update(
                             migration_version.filter(version.eq(mv.try_into().unwrap():i64))

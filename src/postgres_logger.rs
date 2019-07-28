@@ -11,17 +11,17 @@ use super::SESSION_ID;
 
 pub const INTERNAL_LOG_TARGET:&str = "postgres_logger_db";
 
-type DPool = r2d2::Pool<crate::diesel::r2d2::ConnectionManager<diesel::pg::PgConnection>>;
+use crate::DBPool;
 
 pub struct PostgresLogger{
-    pool: DPool,
+    pool: DBPool,
     level: Level,
     b_o_t: std::time::Instant,
 }
 
 impl PostgresLogger {
     pub fn new(
-        pool: DPool,
+        pool: DBPool,
         level: Level,
         b_o_t: std::time::Instant
     ) -> Self {

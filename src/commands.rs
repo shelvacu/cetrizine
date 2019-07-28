@@ -9,6 +9,7 @@ use crate::{
     r2d2,
     r2d2_postgres,
     diesel::prelude::*,
+    ArcPool,
 };
 use serenity::{
     model::prelude::*,
@@ -44,7 +45,7 @@ fn some_kind_of_uppercase_first_letter(s: &str) -> String {
 }
 
 fn get_guild_prefix(
-    pool: &Arc<r2d2::Pool<diesel::r2d2::ConnectionManager<diesel::pg::PgConnection>>>,
+    pool: &ArcPool,
     guild_id: GuildId
 ) -> Result<Option<String>,CetrizineError> {
     use crate::schema::guild_prefixes::dsl;

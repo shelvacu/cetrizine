@@ -324,7 +324,7 @@ composite_type! {
 pub struct SQL_Moment;
 
 composite_type! {
-    #[derive(PartialEq,Eq,Debug)]
+    #[derive(PartialEq,Eq,Debug,Clone)]
     #[sql_type = "SQL_Moment"]
     SQL_Moment, DbMoment,
     session_id -> Int8 : i64,
