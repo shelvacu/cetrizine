@@ -296,6 +296,7 @@ table! {
         kind -> Text,
         content_text -> Nullable<Text>,
         content_binary -> Nullable<Bytea>,
+        downloaded_any_files -> Bool,
     }
 }
 
@@ -434,6 +435,15 @@ table! {
     }
 }
 
+table! {
+    use diesel::sql_types::*;
+    use crate::db_types::*;
+    raw_message_to_download (raw_message_rowid, download_rowid) {
+        raw_message_rowid -> Int8,
+        download_rowid -> Int8,
+    }
+}
+
 joinable!(attachment -> message (message_rowid));
 joinable!(embed -> message (message_rowid));
 joinable!(embed_field -> embed (embed_rowid));
@@ -458,6 +468,8 @@ joinable!(voice_state -> guild (guild_rowid));
 joinable!(download -> download_data (download_data_rowid));
 joinable!(attachment -> download (download_rowid));
 joinable!(download_header -> download (download_rowid));
+joinable!(raw_message_to_download -> raw_message (raw_message_rowid));
+joinable!(raw_message_to_download -> download (download_rowid));
 
 allow_tables_to_appear_in_same_query!(
     attachment,
@@ -489,4 +501,5 @@ allow_tables_to_appear_in_same_query!(
     download_data,
     download,
     download_header,
+    raw_message_to_download,
 );

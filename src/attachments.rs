@@ -11,27 +11,20 @@ use crate::diesel::prelude::*;
 use std::io::Read;
 use std::convert::TryInto;
 
-pub fn archive_attachments(
-    pool: &crate::ArcPool,
-    session_id: i64,
-    beginning_of_time: std::time::Instant,
-) -> Result<(), crate::CetrizineError>{
-    use schema::{
-        download_data::dsl as dd_dsl,
-        download::dsl as d_dsl,
-        attachment::dsl as a_dsl,
-        download_header::dsl as dh_dsl,
-    };
+#[derive(Queryable, Debug)]
+pub struct RawMessage {
+    rowid: i64,
+    recvd_at_datetime: chrono::DateTime<chrono::Utc>,
+    recvd_at_duration_secs: i64,
+    recvd_at_duration_nanos: i32,
+    session_rowid: i64,
+    kind: String,
+    content_text: Option<String>,
+    content_binary: Option<Vec<u8>>,
+    downloaded_any_files: bool,
+}
 
-    #[derive(Queryable,QueryId)]
-    //#[table_name = "attachment"]
-    struct AttachmentData {
-        rowid: i64,
-        url: String,
-    }
-
-    let conn = pool.get()?;
-        
+pub fn build_client() -> Client {
     let mut headers = header::HeaderMap::new();
     headers.insert(
         header::USER_AGENT,
@@ -51,6 +44,57 @@ pub fn archive_attachments(
         //.h2_prior_knowledge()
         .build()
         .unwrap();
+    client
+}
+
+pub fn archive_all_from_ws_message(
+    conn: &diesel::pg::PgConnection,
+    client: &mut Client,
+    session_id: i64,
+    beginning_of_time: std::time::Instant,
+    raw_message_rowid: i64,
+    msg: &RawMessage,
+) -> Result<(), crate::CetrizineError>{
+    if msg.downloaded_any_files {
+        warn!("got sent a rawmessage that is marked as already having downloaded messages???");
+        return Ok(())
+    }
+
+    let json_val = if let Some(bytes) = msg.content_binary {
+        serde_json::from_reader(flate2::read::ZlibDecoder::new(&bytes[..]))?
+    } else if let Some(text) = msg.content_text {
+        serde_json::from_str(&text)?
+    } else {
+        panic!("expected either content_binary or content_text to be non-null")
+    };
+    
+    let ev = crate::serenity::model::event::GatewayEvent::deserialize(json_val)?;
+
+    Ok(())
+}
+
+pub fn archive_attachments(
+    pool: &crate::ArcPool,
+    session_id: i64,
+    beginning_of_time: std::time::Instant,
+) -> Result<(), crate::CetrizineError>{
+    use schema::{
+        download_data::dsl as dd_dsl,
+        download::dsl as d_dsl,
+        attachment::dsl as a_dsl,
+        download_header::dsl as dh_dsl,
+    };
+
+    #[derive(Queryable)]
+    //#[table_name = "attachment"]
+    struct AttachmentData {
+        rowid: i64,
+        url: String,
+    }
+
+    let conn = pool.get()?;
+
+    let client = build_client();
 
     loop {
         let res:Vec<AttachmentData> = a_dsl::attachment.select((

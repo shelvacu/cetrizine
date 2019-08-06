@@ -47,6 +47,9 @@ extern crate sha2;
 extern crate hex;
 extern crate reqwest;
 
+extern crate serde_json;
+extern crate flate2;
+
 use sha2::{Sha256,Digest};
 
 use backtrace::Backtrace;
@@ -1171,7 +1174,7 @@ impl Handler {
             )?;
         }
 
-        //This is for consistency/debugging purposes, if a certain channel is causing problems it can be annoying when it changes ordering
+        //This is for consistency in debugging purposes, if a certain channel is causing problems it can be annoying when it changes ordering
         //private_channels_to_archive.sort_unstable_by_key(|p| p.0);
 
         for chan_id in &private_channels_to_archive {
@@ -1185,7 +1188,6 @@ impl Handler {
     
     fn message_result(&self, ctx: Context, msg: Message) -> Result<(), CetrizineError> {
         let handler_start = Utc::now();
-        //let kill_command = "shift alt bloodbath";
         let conn = ctx.get_pool_arc().get()?;
         let guild_str;
         if let Some(guild_id) = msg.guild_id {
