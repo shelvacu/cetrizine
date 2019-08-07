@@ -47,14 +47,13 @@ extern crate sha2;
 extern crate hex;
 extern crate reqwest;
 
+extern crate serde;
 extern crate serde_json;
 extern crate flate2;
 
 use sha2::{Sha256,Digest};
 
-use backtrace::Backtrace;
-
-use r2d2_postgres::r2d2;
+pub use r2d2_postgres::r2d2;
 
 use chrono::prelude::{DateTime,Utc};
 
@@ -119,6 +118,7 @@ mod postgres_logger;
 mod command_log_macro;
 mod commands;
 mod attachments;
+mod error;
 
 use db_types::*;
 use diesel::prelude::*;
@@ -389,72 +389,7 @@ fn set_after_message_id(c: &diesel::pg::PgConnection, session_id_arg: i64, chann
     Ok(())
 }
 
-
-#[derive(Debug)]
-pub struct CetrizineError{
-    pub error_type: CetrizineErrorType,
-    pub backtrace: Backtrace,
-}
-
-impl CetrizineError {
-    fn new(error_type: CetrizineErrorType) -> Self {
-        CetrizineError{
-            error_type,
-            backtrace: Backtrace::new(),
-        }
-    }
-}
-
-#[derive(Debug)]
-pub enum CetrizineErrorType{
-    Pool(r2d2::Error),
-    Sql(diesel::result::Error),
-    Serenity(serenity::Error),
-    Io(std::io::Error),
-}
-
-impl std::fmt::Display for CetrizineError {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "{:?}", self)
-    }
-}
-
-impl std::error::Error for CetrizineError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        use CetrizineErrorType::*;
-        match &self.error_type {
-            Pool(e)     => Some(e),
-            Sql(e)      => Some(e),
-            Serenity(e) => Some(e),
-            Io(e)       => Some(e),
-        }
-    }
-}
-
-impl From<diesel::result::Error> for CetrizineError {
-    fn from(err: diesel::result::Error) -> Self {
-        CetrizineError::new(CetrizineErrorType::Sql(err))
-    }
-}
-
-impl From<serenity::Error> for CetrizineError {
-    fn from(err: serenity::Error) -> Self {
-        CetrizineError::new(CetrizineErrorType::Serenity(err))
-    }
-}
-
-impl From<r2d2::Error> for CetrizineError {
-    fn from(err: r2d2::Error) -> Self {
-        CetrizineError::new(CetrizineErrorType::Pool(err))
-    }
-}
-
-impl From<std::io::Error> for CetrizineError {
-    fn from(err: std::io::Error) -> Self {
-        CetrizineError::new(CetrizineErrorType::Io(err))
-    }
-}
-
+pub use error::CetrizineError;
 
 impl Handler {
     fn archive_raw_event(&self, ctx: Context, ev: WsEvent) -> Result<(), CetrizineError> {

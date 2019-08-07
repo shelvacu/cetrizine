@@ -9,7 +9,10 @@ use crate::schema;
 use crate::CetrizineError;
 use crate::diesel::prelude::*;
 use std::io::Read;
+use std::sync::Arc;
 use std::convert::TryInto;
+use serde::de::Deserialize;
+use serenity::model::channel::Channel;
 
 #[derive(Queryable, Debug)]
 pub struct RawMessage {
@@ -37,14 +40,125 @@ pub fn build_client() -> Client {
             )
         )
     );
-    let client = Client::builder()
+    Client::builder()
         .default_headers(headers)
         .gzip(true)
         .connect_timeout(Some(std::time::Duration::from_secs(30)))
         //.h2_prior_knowledge()
         .build()
-        .unwrap();
-    client
+        .unwrap()
+}
+
+fn urls_from_user(user: &serenity::model::user::User, urls: &mut Vec<String>) {
+    urls.push(user.default_avatar_url());
+}
+
+fn urls_from_channel(chan: Channel, urls: &mut Vec<String>) {
+    match chan {
+        Channel::Group(group_lock) => {
+            let group = group_lock.read();
+            if let Some(url) = &group.icon {
+                urls.push(url.clone());
+            }
+        },
+        Channel::Guild(_guild_chan_lock) => (),
+        Channel::Private(private_chan_lock) => {
+            let private_chan = private_chan_lock.read();
+            urls_from_user(&*private_chan.recipient.read(), urls);
+        },
+        Channel::Category(_category_lock) => (),
+    }
+}
+
+fn urls_from_partial_guild(guild: &serenity::model::guild::PartialGuild, urls: &mut Vec<String>) {
+    for emoji in guild.emojis.values() {
+        urls.push(emoji.url());
+    }
+    if let Some(icon_url) = guild.icon_url() {
+        urls.push(icon_url);
+    }
+    if let Some(splash_url) = guild.splash_url() {
+        urls.push(splash_url);
+    }
+    if let Some(banner_url) = guild.banner_url() {
+        urls.push(banner_url);
+    }
+}
+
+fn urls_from_guild(guild: &serenity::model::guild::Guild, urls: &mut Vec<String>) {
+    for chan in guild.channels.values() {
+        urls_from_channel(Channel::Guild(Arc::clone(chan)), urls);
+    }
+    for member in guild.members.values() {
+        urls_from_user(&*member.user.read(), urls);
+    }
+    urls_from_partial_guild(&guild.clone().into(), urls);
+}
+
+fn urls_from_embed(embed: &serenity::model::channel::Embed, urls: &mut Vec<String>) {
+    if let Some(author) = embed.author {
+        if let Some(url) = author.icon_url {
+            urls.push(url);
+        }
+        if let Some(url) = author.url {
+            urls.push(url);
+        }
+    }
+    if let Some(Some(icon_url)) = embed.footer.map(|f| f.icon_url) {
+        urls.push(icon_url);
+    }
+    if let Some(image) = embed.image {
+        urls.push(image.url);
+    }
+    if let Some(provider_url) = embed.provider.map(|p| p.url).flatten() {
+        urls.push(provider_url);
+    }
+    if let Some(thumbnail) = embed.thumbnail {
+        urls.push(thumbnail.url);
+    }
+    if let Some(url) = embed.url {
+        urls.push(url);
+    }
+    if let Some(video) = embed.video {
+        urls.push(video.url);
+    }
+}
+
+fn urls_from_message(msg: &serenity::model::channel::Message, urls: &mut Vec<String>) {
+    for attachment in msg.attachments {
+        urls.push(attachment.url.clone());
+    }
+    urls_from_user(&msg.author, urls);
+    //todo: is there any scanning I want to do of the message contents?
+    for embed in msg.embeds {
+        urls_from_embed(&embed, urls);
+    }
+    for mention in msg.mentions {
+        urls_from_user(&mention, urls);
+    }
+    //todo: download images for any reactions
+}
+
+fn urls_from_message_update_event(msg: &serenity::model::event::MessageUpdateEvent, urls: &mut Vec<String>) {
+    if let Some(attachments) = msg.attachments {
+        for attachment in attachments {
+            urls.push(attachment.url.clone());
+        }
+    }
+    if let Some(embeds) = msg.embeds{
+        for embed in embeds {
+            urls_from_embed(&embed, urls);
+        }
+    }
+    if let Some(mentions) = msg.mentions {
+        for mention in mentions {
+            urls_from_user(&mention, urls);
+        }
+    }
+}
+
+fn urls_from_presence(presence: &serenity::model::gateway::Presence, urls: &mut Vec<String>) {
+    if let Some(user) = presence.user {urls_from_user(&*user.read(), &mut urls);}
 }
 
 pub fn archive_all_from_ws_message(
@@ -55,20 +169,56 @@ pub fn archive_all_from_ws_message(
     raw_message_rowid: i64,
     msg: &RawMessage,
 ) -> Result<(), crate::CetrizineError>{
+    use crate::serenity::model::event::GatewayEvent;
+    use serenity::model::event::Event::*;
     if msg.downloaded_any_files {
         warn!("got sent a rawmessage that is marked as already having downloaded messages???");
         return Ok(())
     }
 
-    let json_val = if let Some(bytes) = msg.content_binary {
-        serde_json::from_reader(flate2::read::ZlibDecoder::new(&bytes[..]))?
-    } else if let Some(text) = msg.content_text {
+    let ev:GatewayEvent = if let Some(bytes) = &msg.content_binary {
+        serde_json::from_reader(flate2::bufread::ZlibDecoder::new(&bytes[..]))?
+    } else if let Some(text) = &msg.content_text {
         serde_json::from_str(&text)?
     } else {
         panic!("expected either content_binary or content_text to be non-null")
     };
-    
-    let ev = crate::serenity::model::event::GatewayEvent::deserialize(json_val)?;
+
+    let mut urls:Vec<String> = Vec::new();
+
+    if let GatewayEvent::Dispatch(_, event) = ev {
+        match event {
+            Raw => (),
+            ChannelCreate(ev) => urls_from_channel(ev.channel, &mut urls),
+            ChannelDelete(ev) => urls_from_channel(ev.channel, &mut urls),
+            ChannelPinsUpdate(_) => (),
+            ChannelRecipientAdd(ev) => urls_from_user(&ev.user, &mut urls),
+            ChannelRecipientRemove(ev) => urls_from_user(&ev.user, &mut urls),
+            ChannelUpdate(ev) => urls_from_channel(ev.channel, &mut urls),
+            GuildBanAdd(ev) => urls_from_user(&ev.user, &mut urls),
+            GuildBanRemove(ev) => urls_from_user(&ev.user, &mut urls),
+            GuildCreate(ev) => urls_from_guild(&ev.guild, &mut urls),
+            GuildDelete(ev) => urls_from_partial_guild(&ev.guild, &mut urls),
+            GuildEmojisUpdate(ev) => for emoji in ev.emojis.values() {urls.push(emoji.url());},
+            GuildIntegrationsUpdate(_) => (),
+            GuildMemberAdd(ev) => urls_from_user(&*ev.member.user.read(), &mut urls),
+            GuildMemberRemove(ev) => urls_from_user(&ev.user, &mut urls),
+            GuildMemberUpdate(ev) => urls_from_user(&ev.user, &mut urls),
+            GuildMembersChunk(ev) => for member in ev.members.values() {urls_from_user(&*member.user.read(), &mut urls);},
+            GuildRoleCreate(_) => (),
+            GuildRoleDelete(_) => (),
+            GuildRoleUpdate(_) => (),
+            GuildUnavailable(_) => (),
+            GuildUpdate(ev) => urls_from_partial_guild(&ev.guild, &mut urls),
+            MessageCreate(ev) => urls_from_message(&ev.message, &mut urls),
+            MessageDelete(_) => (),
+            MessageDeleteBulk(_) => (),
+            MessageUpdate(ev) => urls_from_message_update_event(&ev, &mut urls),
+            PresenceUpdate(ev) => urls_from_presence(&ev.presence, &mut urls),
+            PresencesReplace(ev) => for presence in ev.presences {urls_from_presence(&presence, &mut urls);},
+            ReactionAdd(ev) => 
+        }
+    }
 
     Ok(())
 }
