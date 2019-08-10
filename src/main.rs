@@ -82,6 +82,7 @@ use std::convert::{TryFrom,TryInto};
 use std::process;
 use std::os::unix::process::CommandExt;
 use std::ffi::OsString;
+use std::time::Duration;
 
 macro_rules! pg_insert_helper {
     ( $db:expr, $table_name:ident, $( $column_name:ident => $column_value:expr , )+ ) => {{
@@ -1524,19 +1525,64 @@ DB migration version: {}",
 
         let (new_attachment_tx, new_attachment_rx) = std::sync::mpsc::channel::<()>();
 
-        let download_thread_arc_pool = Arc::clone(&arc_pool);
+        let attachment_download_thread_arc_pool = Arc::clone(&arc_pool);
         std::thread::spawn(move || {
             loop {
                 while let Ok(()) = new_attachment_rx.try_recv() {}
                 info!("Starting archive_attachments thread");
                 log_any_error!(attachments::archive_attachments(
-                    &download_thread_arc_pool,
+                    &attachment_download_thread_arc_pool,
                     session_id,
                     beginning_of_time,
                 ));
                 info!("Finished archive_attachments thread");
                 new_attachment_rx.recv().unwrap();
             }
+        });
+
+        let scan_thread_arc_pool = Arc::clone(&arc_pool);
+        std::thread::spawn(move ||{
+            use schema::raw_message::dsl;
+            let conn = scan_thread_arc_pool.get().unwrap();
+            log_any_error!{(||
+                loop {
+                    let needing_scan:Vec<attachments::RawMessage> = dsl::raw_message.filter(
+                        dsl::scanned_for_urls.eq(false)
+                    ).limit(100).load(&conn)?;
+                    info!("Found {} rows needing scan.", needing_scan.len());
+                    if needing_scan.is_empty() {
+                        std::thread::sleep(Duration::from_millis(1000));
+                        continue;
+                    }
+                    for row in needing_scan {
+                        attachments::scan_urls_from_ws_message(&*conn, &row)?;
+                    }
+                }
+            )():Result<(), CetrizineError>};
+        });
+
+        let download_thread_arc_pool = Arc::clone(&arc_pool);
+        std::thread::spawn(move ||{
+            use schema::raw_message_url::dsl;
+            let conn = download_thread_arc_pool.get().unwrap();
+            log_any_error!{(||
+                loop {
+                    let needing_download:Vec<attachments::RawMessageUrl> = dsl::raw_message_url.filter(
+                        dsl::been_downloaded.eq(false)
+                    ).limit(100).load(&conn)?;
+                    info!("Found {} rows needing download.", needing_download.len());
+                    if needing_download.is_empty() {
+                        std::thread::sleep(Duration::from_millis(1000));
+                        continue;
+                    }
+
+                    let mut client = attachments::build_client();
+
+                    for row in needing_download {
+                        attachments::download_scanned_url(&*conn, &mut client, session_id, beginning_of_time, row)?;
+                    }
+                }
+            )():Result<(), CetrizineError>};
         });
 
         let is_bot = discord_token.starts_with("Bot ");
