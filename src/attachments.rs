@@ -125,7 +125,7 @@ impl UrlsInto for String {
 
 impl UrlsInto for serenity::model::user::User {
     fn urls_into(&self, urls: &mut Vec<String>) {
-        urls.push(self.default_avatar_url());
+        urls.push(self.avatar_url().unwrap_or_else(|| self.default_avatar_url()));
     }
 }
 
@@ -178,7 +178,7 @@ impl UrlsInto for serenity::model::guild::Member {
 
 impl UrlsInto for serenity::model::guild::PartialGuild {
     fn urls_into(&self, urls: &mut Vec<String>) {
-        self.emojis.values().map(Clone::clone).urls_into(urls);
+        self.emojis.values().cloned().urls_into(urls);
         self.icon_url().urls_into(urls);
         self.splash_url().urls_into(urls);
         self.banner_url().urls_into(urls);
@@ -187,8 +187,8 @@ impl UrlsInto for serenity::model::guild::PartialGuild {
 
 impl UrlsInto for serenity::model::guild::Guild {
     fn urls_into(&self, urls: &mut Vec<String>) {
-        self.channels.values().map(|v| v.clone()).urls_into(urls);
-        self.members.values().map(Clone::clone).urls_into(urls);
+        self.channels.values().cloned().urls_into(urls);
+        self.members.values().cloned().urls_into(urls);
         let pg:serenity::model::guild::PartialGuild = self.clone().into();
         pg.urls_into(urls);
     }
@@ -287,7 +287,7 @@ impl UrlsInto for serenity::model::channel::ReactionType {
     fn urls_into(&self, urls: &mut Vec<String>) {
         use serenity::model::channel::ReactionType::*;
         match self {
-            Custom{animated, id, name: _} => urls.push(id.url(*animated)),
+            Custom{animated, id, ..} => urls.push(id.url(*animated)),
             Unicode(_) => (),
         }
     }
@@ -313,8 +313,8 @@ impl UrlsInto for serenity::model::guild::GuildStatus {
 impl UrlsInto for serenity::model::gateway::Ready {
     fn urls_into(&self, urls: &mut Vec<String>) {
         self.guilds.urls_into(urls);
-        self.presences.values().map(Clone::clone).urls_into(urls);
-        self.private_channels.values().map(Clone::clone).urls_into(urls);
+        self.presences.values().cloned().urls_into(urls);
+        self.private_channels.values().cloned().urls_into(urls);
         self.user.urls_into(urls);
     }
 }
@@ -343,7 +343,7 @@ pub fn scan_urls_from_ws_message(
         warn!("got sent a rawmessage that is marked as already having downloaded messages???");
         return Ok(())
     }
-    info!("Scanning {:?}", msg);
+    trace!("Scanning {:?}", msg);
 
     let ev:GatewayEvent = if let Some(bytes) = &msg.content_binary {
         serde_json::from_reader(flate2::bufread::ZlibDecoder::new(&bytes[..]))?
@@ -368,12 +368,12 @@ pub fn scan_urls_from_ws_message(
             GuildBanRemove(ev) => ev.user.urls_into(&mut urls),
             GuildCreate(ev) => ev.guild.urls_into(&mut urls),
             GuildDelete(ev) => ev.guild.urls_into(&mut urls),
-            GuildEmojisUpdate(ev) => ev.emojis.values().map(Clone::clone).urls_into(&mut urls),
+            GuildEmojisUpdate(ev) => ev.emojis.values().cloned().urls_into(&mut urls),
             GuildIntegrationsUpdate(_) => (),
             GuildMemberAdd(ev) => ev.member.urls_into(&mut urls),
             GuildMemberRemove(ev) => ev.user.urls_into(&mut urls),
             GuildMemberUpdate(ev) => ev.user.urls_into(&mut urls),
-            GuildMembersChunk(ev) => ev.members.values().map(Clone::clone).urls_into(&mut urls),
+            GuildMembersChunk(ev) => ev.members.values().cloned().urls_into(&mut urls),
             GuildRoleCreate(_) => (),
             GuildRoleDelete(_) => (),
             GuildRoleUpdate(_) => (),
@@ -402,7 +402,9 @@ pub fn scan_urls_from_ws_message(
     urls.sort_unstable();
     urls.dedup();
 
-    info!("Found {} urls after dedup.", urls.len());
+    if !urls.is_empty() {
+        info!("Found {} urls after dedup.", urls.len());
+    }
 
     conn.transaction(||{
         diesel::insert_into(rmu_dsl::raw_message_url)
@@ -414,7 +416,7 @@ pub fn scan_urls_from_ws_message(
                 )
             ).collect():Vec<_>)
             .execute(conn)?;
-        diesel::update(rm_dsl::raw_message).set(rm_dsl::scanned_for_urls.eq(true)).execute(conn)?;
+        diesel::update(msg).set(rm_dsl::scanned_for_urls.eq(true)).execute(conn)?;
         Ok(()):Result<(), CetrizineError>
     })?;
     Ok(())
@@ -450,7 +452,7 @@ pub fn download_scanned_url(
                 rmu_dsl::url.eq(&url_row.url)
             )
         );
-    if let Some(_) = maybe_download_rowid {
+    if maybe_download_rowid.is_some() {
         info!("Url {} already downloaded, marking.", url);
         diesel::update(filter_dsl).set(rmu_dsl::been_downloaded.eq(true)).execute(conn)?;
     }else{
