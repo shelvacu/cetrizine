@@ -1383,7 +1383,7 @@ fn main() {
         let started_at = chrono::Utc::now();
         //let mut verbose = false;
         let mut discord_token = String::from("");
-        let mut postgres_path_opt:Option<String> = None;
+        let mut postgres_path = String::from("");
         let mut no_auto_migrate = false;
         let mut migrate_only = false;
         let mut init_db = false;
@@ -1414,11 +1414,11 @@ DB migration version: {}",
                 ),
                 "Show version"
             );
-            ap.refer(&mut postgres_path_opt)
-            //.envvar("PG_PATH")
+            ap.refer(&mut postgres_path)
+                .envvar("POSTGRES_PATH")
                 .required()
-                .add_option(&["-p", "--postgres-path"], StoreOption,
-                            "postgres connection path");
+                .add_option(&["-p", "--postgres-path"], Store,
+                            "Postgres connection path. Can also be provided in environment variable POSTGRES_PATH");
             ap.refer(&mut no_auto_migrate)
                 .add_option(&["--no-auto-migrate"], StoreTrue,
                             "Don't automatically perform database migrations");
@@ -1430,8 +1430,6 @@ DB migration version: {}",
                             "Initializes the database schema. Note that the `CREATE DATABASE` command needs to be run separately. This will also run the program normally unless --migrate-only is specified.");
             ap.parse_args_or_exit()
         }
-
-        let postgres_path = postgres_path_opt.unwrap();
 
         let manager = diesel::r2d2::ConnectionManager::new(postgres_path.as_str());
         let pool = r2d2::Pool::new(manager).unwrap();
@@ -1507,18 +1505,7 @@ DB migration version: {}",
             while let Ok((channel, guild_name)) = chan_rx.recv() {
                 if let Some(conn) = log_any_error!(threads_arc_pool.get()) {
                     let res = Handler::grab_channel_archive(threads_cache_and_http.as_ref(), &*conn, &channel, guild_name);
-                    /*if let Err(CetrizineError{backtrace: bt, error_type: CetrizineErrorType::Serenity(serenity::Error::Http(serenity::prelude::HttpError::UnsuccessfulRequest(mut http_response)))}) = res {
-                        warn!(
-                            "HTTP error!\n\nHTTP response: {:?}\n\nBacktrace: {:?}",
-                            http_response,
-                            bt,
-                        );
-                        let mut body = String::new();
-                        match std::io::Read::read_to_string(&mut http_response, &mut body) {
-                            Ok(body) => warn!("HTTP body: {:?}", body),
-                            Err(why) => warn!("could not read http body {:?}", why),
-                        }
-                    }else{*/ log_any_error!(res); //}
+                    log_any_error!(res);
                 }
             }
         });
@@ -1623,7 +1610,7 @@ DB migration version: {}",
         let args:Vec<OsString> = std::env::args_os().collect();
         let chan_str = format!("{}", chan_id);
         info!("Going in for re-exec");
-        let err = process::Command::new("target/release/cetrizine")//(&args[0])
+        let err = process::Command::new(&args[0])
             .args(&args[1..])
             .env("RE_EXECD", chan_str)
             .exec();
