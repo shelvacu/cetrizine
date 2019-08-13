@@ -456,12 +456,16 @@ impl Handler {
             _ => return Ok(()),
         };
         let choices_a:Option<RpsGame> = diesel::update(dsl::rps_game.filter(
-            dsl::challenger_private_message_id.eq(SmartHax(reaction.message_id))
+            dsl::challenger_private_message_id.eq(SmartHax(reaction.message_id)).and(
+                dsl::challenger_choice.is_null()
+            )
         )).set(
             dsl::challenger_choice.eq(choice)
         ).returning(rps_game_select).get_result(&*conn).optional()?;
         let choices_b:Option<RpsGame> = diesel::update(dsl::rps_game.filter(
-            dsl::receiver_private_message_id.eq(SmartHax(reaction.message_id))
+            dsl::receiver_private_message_id.eq(SmartHax(reaction.message_id)).and(
+                dsl::receiver_choice.is_null()
+            )
         )).set(
             dsl::receiver_choice.eq(choice)
         ).returning(rps_game_select).get_result(&*conn).optional()?;

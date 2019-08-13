@@ -110,6 +110,7 @@ group!({
         horse,
         invite_url,
         test,
+        rps_start,
     ],
 });
 
@@ -226,25 +227,37 @@ impl FromCommandArgs for UserId {
 #[aliases("rpschallenge","rpsstart","rps_challenge","rps_start","rps challenge","rps start","\u{1F5FF}\u{1F4F0}\u{2702}","rps")]
 fn rps_start(ctx: &mut Context, msg: &Message, args: Args) -> CommandResult {
     lazy_static!{
-        static ref EIGHTBALL_MESSAGES:[&'static str; 6] = [
+        static ref EIGHTBALL_MESSAGES:[&'static str; 9] = [
             "Winners pick snippers!",
-            "I'd avoid solids.",
+            "I'd prefer something solid.",
             "Be thin and flexible.",
             "Cut to the chase.",
             "Hard to beat rock.",
             "Take note.",
+            "Paper will never see it coming.",
+            "Scissors deserve to be bent",
+            "You've got this covered. \"this\" being a rock. Cover the rock.",
         ];
     }
     use serenity::model::channel::ReactionType;
     use schema::rps_game::dsl;
+
     let maybe_receiver_id = UserId::from_command_args(ctx, msg, args.rest());
     match maybe_receiver_id {
         Ok(receiver_id) => {
+            let eightball_msg = EIGHTBALL_MESSAGES[(msg.id.0 % EIGHTBALL_MESSAGES.len().try_into().unwrap():u64) as usize];
+            let common_text = format!(
+                "to a rock-paper-scissors duel! Pick your weapon: (\u{1F5FF} is what's used for \"rock\", there really isn't anything closer, sorry.)\n\nWisdom: {}",
+                eightball_msg,
+            );
             let challenger_id = msg.author.id;
             let challenger_channel = challenger_id.create_dm_channel(&ctx)?;
             let challenger_msg = challenger_channel.send_message(&ctx, |cm|
                 cm.content(format!( 
-                    "You challenged {} to a rock-paper-scissors duel! Pick your weapon: (\u{1F5FF} is what's used for \"rock\", there really isn't anything closer, sorry.)", receiver_id.mention()))
+                    "You challenged {} {}", 
+                    receiver_id.mention(),
+                    &common_text,
+                ))
                     .reactions(vec![
                         "\u{1F5FF}",
                         "\u{1F4F0}",
@@ -255,7 +268,10 @@ fn rps_start(ctx: &mut Context, msg: &Message, args: Args) -> CommandResult {
             let receiver_channel = receiver_id.create_dm_channel(&ctx)?;
             let receiver_msg = receiver_channel.send_message(&ctx, |cm|
                 cm.content(format!( 
-                    "You have been challenged by {} to a rock-paper-scissors duel! Pick your weapon: (\u{1F5FF} is what's used for \"rock\", there really isn't anything closer, sorry.)", challenger_id.mention()))
+                    "You have been challenged by {} {}", 
+                    challenger_id.mention(),
+                    &common_text,
+                ))
                     .reactions(vec![
                         "\u{1F5FF}",
                         "\u{1F4F0}",
@@ -271,7 +287,6 @@ fn rps_start(ctx: &mut Context, msg: &Message, args: Args) -> CommandResult {
                 dsl::challenger_private_message_id.eq(SmartHax(challenger_msg.id)),
                 dsl::receiver_private_message_id.eq(SmartHax(receiver_msg.id)),
             )).returning(dsl::rowid).get_result(&*conn)?;
-            let eightball_msg = EIGHTBALL_MESSAGES[(msg.id.0 % EIGHTBALL_MESSAGES.len().try_into().unwrap():u64) as usize];
             msg.channel_id.say(
                 ctx,
                 format!(
@@ -332,7 +347,7 @@ command_log!(
 );
 
 command_log!(
-    #[aliases("invite url", "invite", "inv")]
+    #[aliases("inviteurl", "invite url", "invite", "inv")]
     fn invite_url(ctx, message) {
         let user_id = USER_ID.load(Ordering::Relaxed);
         let perms = Permissions::READ_MESSAGES | Permissions::SEND_MESSAGES | Permissions::EMBED_LINKS | Permissions::ATTACH_FILES | Permissions::READ_MESSAGE_HISTORY;
@@ -576,7 +591,7 @@ command_log!(
 
 
 command_log!(
-    #[aliases("help", "info", "\u{2139}", "\u{2139}\u{fe0f}")]
+    #[aliases("help", "info", "\u{2139}", "\u{2139}\u{fe0f}", "?", "h", "-h", "-?", "/?", "/h", "--help")]
     fn help_info(ctx, message) {
         let reply_text = format!(
             "
@@ -589,9 +604,14 @@ Commands:
 {2}binaryencode - Convert from text to binary (shortcut: be)
 {2}binarydecode - Convert from binary to text (shortcut: bd)
 {2}help - Display this message (also: info)
+{2}rpschallenge - Challenge someone to a game of rock-paper-scissors (shortcut: rps)
+{2}inviteurl - Display the invite url for this bot (shortcut: inv)
+{2}archivechannel - Move the current channel into the category named \"Archived\"
 
 Note: You can always perform commands by pinging this bot at the beginning, eg:
 <@{3}> command
+
+Source code available at <https://github.com/shelvacu/cetrizine>
 
 App icon based on <https://icons8.com/icon/114217/floppy-disk>
 

@@ -207,7 +207,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 
 [[package]]
 name = "cetrizine"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "argparse 0.2.2 (registry+https://github.com/rust-lang/crates.io-index)",
  "backtrace 0.3.26 (registry+https://github.com/rust-lang/crates.io-index)",
