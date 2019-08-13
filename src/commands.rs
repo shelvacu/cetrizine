@@ -10,6 +10,7 @@ use crate::{
     r2d2_postgres,
     diesel::prelude::*,
     ArcPool,
+    schema,
 };
 use serenity::{
     model::prelude::*,
@@ -22,8 +23,10 @@ use serenity::{
     }
 };
 
+use regex::Regex;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::convert::TryInto;
 
 
 trait BoolExt {
@@ -88,6 +91,7 @@ pub fn cetrizine_framework(my_id: UserId) -> StandardFramework {
                 .owners(owners)
         )
         .group(&DEFAULT_GROUP)
+        .group(&GUILD_ADMIN_GROUP)
         .group(&OWNER_GROUP)
 }
 
@@ -106,6 +110,17 @@ group!({
         horse,
         invite_url,
         test,
+    ],
+});
+
+group!({
+    name: "guild_admin",
+    options: {
+        only_in: "guilds",
+        required_permissions: [ADMINISTRATOR],
+    },
+    commands: [
+        archive_channel,
     ],
 });
 
@@ -143,6 +158,169 @@ fn test(ctx: &mut Context, msg: &Message, mut args: Args) -> CommandResult {
     msg.reply(ctx, &reply)?;
     Ok(())
 }
+
+trait FromCommandArgs : Sized {
+    fn from_command_args(ctx: &Context, msg: &Message, arg: &str) -> Result<Self, &'static str>;
+}
+
+impl FromCommandArgs for UserId {
+    fn from_command_args(ctx: &Context, msg: &Message, arg: &str) -> Result<Self, &'static str> {
+        lazy_static! {
+            static ref USER_PING_RE: Regex = Regex::new(r"^\s*<@!?(\d+)>\s*$").unwrap();
+        }
+        if arg == "." || arg == "self" {
+            return Ok(msg.author.id);
+        }
+        // if arg == "last" || arg == "him" || arg == "her" || arg == "them" {
+        //     //TODO: find message before the current one that isn't from author in the same channel, and return that UserId
+        // }
+        if let Ok(raw_id) = arg.parse():Result<u64,_> {
+            return Ok(UserId::from(raw_id));
+        }
+
+        if let Some(ma) = USER_PING_RE.captures(arg) {
+            if let Ok(raw_id) = ma.get(1).unwrap().as_str().parse():Result<u64,_> {
+                return Ok(UserId::from(raw_id));
+            }
+        }
+
+        if arg.contains('#') {
+            let pieces = arg.rsplitn(2,'#').collect():Vec<&str>;
+            if let Ok(discriminator) = pieces[0].parse():Result<u16, _> {
+                if discriminator <= 9999 {
+                    let name = pieces[1];
+                    let cache = ctx.get_cache().read();
+                    let maybe_user = cache
+                        .users
+                        .values()
+                        .find(|user_lock| {
+                            let user = user_lock.read();
+                            user.discriminator == discriminator && user.name.to_ascii_uppercase() == name.to_ascii_uppercase()
+                        });
+                    if let Some(user_lock) = maybe_user {
+                        return Ok(user_lock.read().id);
+                    }
+                }
+            }
+        }
+
+        if let Some(guild_lock) = msg.guild(&ctx) {
+            let guild = guild_lock.read();
+            for member in guild.members.values() {
+                if let Some(nick) = member.nick.as_ref() {
+                    if nick.to_ascii_uppercase() == arg.to_ascii_uppercase() {
+                        return Ok(member.user.read().id);
+                    }
+                }
+                let user = member.user.read();
+                if user.name.to_ascii_uppercase() == arg.to_ascii_uppercase() {
+                    return Ok(user.id);
+                }
+            }
+        }
+        Err("Could not find any User.")
+    }
+}
+
+#[command]
+#[aliases("rpschallenge","rpsstart","rps_challenge","rps_start","rps challenge","rps start","\u{1F5FF}\u{1F4F0}\u{2702}","rps")]
+fn rps_start(ctx: &mut Context, msg: &Message, args: Args) -> CommandResult {
+    lazy_static!{
+        static ref EIGHTBALL_MESSAGES:[&'static str; 6] = [
+            "Winners pick snippers!",
+            "I'd avoid solids.",
+            "Be thin and flexible.",
+            "Cut to the chase.",
+            "Hard to beat rock.",
+            "Take note.",
+        ];
+    }
+    use serenity::model::channel::ReactionType;
+    use schema::rps_game::dsl;
+    let maybe_receiver_id = UserId::from_command_args(ctx, msg, args.rest());
+    match maybe_receiver_id {
+        Ok(receiver_id) => {
+            let challenger_id = msg.author.id;
+            let challenger_channel = challenger_id.create_dm_channel(&ctx)?;
+            let challenger_msg = challenger_channel.send_message(&ctx, |cm|
+                cm.content(format!( 
+                    "You challenged {} to a rock-paper-scissors duel! Pick your weapon: (\u{1F5FF} is what's used for \"rock\", there really isn't anything closer, sorry.)", receiver_id.mention()))
+                    .reactions(vec![
+                        "\u{1F5FF}",
+                        "\u{1F4F0}",
+                        "\u{2702}",
+                    ])
+            )?;
+
+            let receiver_channel = receiver_id.create_dm_channel(&ctx)?;
+            let receiver_msg = receiver_channel.send_message(&ctx, |cm|
+                cm.content(format!( 
+                    "You have been challenged by {} to a rock-paper-scissors duel! Pick your weapon: (\u{1F5FF} is what's used for \"rock\", there really isn't anything closer, sorry.)", challenger_id.mention()))
+                    .reactions(vec![
+                        "\u{1F5FF}",
+                        "\u{1F4F0}",
+                        "\u{2702}",
+                    ])
+            )?;
+
+            let conn = ctx.get_pool_arc().get()?;
+            let rowid:i64 = diesel::insert_into(dsl::rps_game).values((
+                dsl::game_location_channel_id.eq(SmartHax(msg.channel_id)),
+                dsl::challenger_user_id.eq(SmartHax(challenger_id)),
+                dsl::receiver_user_id.eq(SmartHax(receiver_id)),
+                dsl::challenger_private_message_id.eq(SmartHax(challenger_msg.id)),
+                dsl::receiver_private_message_id.eq(SmartHax(receiver_msg.id)),
+            )).returning(dsl::rowid).get_result(&*conn)?;
+            let eightball_msg = EIGHTBALL_MESSAGES[(msg.id.0 % EIGHTBALL_MESSAGES.len().try_into().unwrap():u64) as usize];
+            msg.channel_id.say(
+                ctx,
+                format!(
+                    "{} has challenged {} to a rock-paper-scissors duel! {}\n\nGame #{}", 
+                    challenger_id.mention(),
+                    receiver_id.mention(),
+                    eightball_msg,
+                    rowid,
+                )
+            )?;
+        },
+        Err(err_msg) => {
+            msg.reply(ctx, err_msg)?;
+            return Ok(());
+        }
+    } 
+    Ok(())
+}
+
+command_log!(
+//    #[command]
+    #[aliases("archivechannel","archive channel")]
+//    fn archive_channel(ctx: &mut Context, msg: &Message, args: Args) -> CommandResult {
+    fn archive_channel(ctx, msg, args) {
+        if args.is_empty() || args.rest() == "." {
+            let maybe_archive_channel_id:Option<serenity::model::id::ChannelId> = ctx
+                .get_cache()
+                .read()
+                .guilds[&msg.guild_id.unwrap()]
+                .read()
+                .channels
+                .values()
+                .find(|&chan_lock| {
+                    let chan = chan_lock.read();
+                    chan.kind == serenity::model::channel::ChannelType::Category && chan.name.to_ascii_uppercase() == "ARCHIVED"
+                })
+                .map(|chan_lock| chan_lock.read().id);
+            if let Some(archive_channel_id) = maybe_archive_channel_id {
+                msg.channel_id.edit(&ctx, |ec| ec.category(archive_channel_id))?;
+                msg.reply(&ctx, "Channel archived")?;
+            } else {
+                msg.reply(&ctx, "Error: Could not find archive channel.")?;
+            }
+        } else {
+            msg.reply(&ctx, "This command does not (yet) work on anything but the channel the command is sent in.")?;
+        }
+        Ok(())
+    }
+);
 
 command_log!(
     #[aliases("Ping!", "🏓")]
@@ -198,7 +376,7 @@ command_log!(
 );
 
 command_log!(
-    #[aliases("r&r")]
+    #[aliases("r&r","rnr")]
     fn recompile_and_run(ctx, message) {
         warn!("Recompile command called");
         let mut messages_to_show = Vec::new();

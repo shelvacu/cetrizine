@@ -445,6 +445,21 @@ table! {
     }
 }
 
+table! {
+    use diesel::sql_types::*;
+    use crate::db_types::*;
+    rps_game (rowid) {
+        rowid -> Int8,
+        game_location_channel_id -> SQL_Snowflake,
+        challenger_user_id -> SQL_Snowflake,
+        receiver_user_id -> SQL_Snowflake,
+        challenger_private_message_id -> SQL_Snowflake,
+        receiver_private_message_id -> SQL_Snowflake,
+        challenger_choice -> Nullable<Text>,
+        receiver_choice -> Nullable<Text>,
+    }
+}
+
 joinable!(attachment -> message (message_rowid));
 joinable!(embed -> message (message_rowid));
 joinable!(embed_field -> embed (embed_rowid));

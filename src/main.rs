@@ -50,6 +50,7 @@ extern crate reqwest;
 extern crate serde;
 extern crate serde_json;
 extern crate flate2;
+extern crate regex;
 
 use sha2::{Sha256,Digest};
 
@@ -353,11 +354,6 @@ fn get_last_message_id(chan:&Channel) -> Option<MessageId> {
     }
 }
 
-/*fn pg_sequence_currval<C: diesel::pg::PgConnection>(c: &C, table: &str, column: &str) -> Result<i64, CetrizineError> {
-    let res:i64 = c.query(&format!("SELECT currval(pg_get_serial_sequence('{}','{}'));",table,column),&[])?.get(0).get(0);
-    Ok(res)
-}*/
-
 fn make_synthetic_mag(c: &diesel::pg::PgConnection, session_id_arg: i64, channel_id_arg: i64) -> Result<(), CetrizineError> {
     use schema::message_archive_gets::dsl;
     diesel::insert_into(dsl::message_archive_gets)
@@ -392,7 +388,121 @@ fn set_after_message_id(c: &diesel::pg::PgConnection, session_id_arg: i64, chann
 
 pub use error::CetrizineError;
 
+fn text_to_emoji(text: &str) -> &'static str {
+    match text {
+        "Rock" => "\u{1F5FF}",
+        "Paper" => "\u{1F4F0}",
+        "Scissors" => "\u{2702}",
+        _ => "?"
+    }
+}
+
 impl Handler {
+    fn reaction_add_result(&self, ctx: Context, reaction: Reaction) -> Result<(), CetrizineError> {
+        use schema::rps_game::dsl;
+        use serenity::model::channel::ReactionType;
+        enum Winner {
+            Challenger,
+            Receiver,
+            Draw,
+        }
+        #[derive(Debug,Queryable)]
+        struct RpsGame {
+            rowid: i64,
+            game_location: Snowflake,
+            challenger: Snowflake,
+            receiver: Snowflake,
+            c_choice: Option<String>,
+            r_choice: Option<String>,
+        }
+
+        struct FinishedRpsGame {
+            rowid: i64,
+            game_location: Snowflake,
+            challenger: Snowflake,
+            receiver: Snowflake,
+            c_choice: String,
+            r_choice: String,
+        }
+
+        impl RpsGame {
+            fn into_finished(self) -> Option<FinishedRpsGame> {
+                if let (Some(c_choice),Some(r_choice)) = (self.c_choice, self.r_choice) {
+                    Some(FinishedRpsGame{
+                        rowid: self.rowid,
+                        game_location: self.game_location,
+                        challenger: self.challenger,
+                        receiver: self.receiver,
+                        c_choice,
+                        r_choice,
+                    })
+                } else { None }
+            }
+        }
+
+        let rps_game_select = (
+            dsl::rowid,
+            dsl::game_location_channel_id,
+            dsl::challenger_user_id,
+            dsl::receiver_user_id,
+            dsl::challenger_choice,
+            dsl::receiver_choice,
+        );
+        let conn = ctx.get_pool_arc().get()?;
+        let choice = match reaction.emoji {
+            ReactionType::Unicode(ref val) if val == "\u{1F5FF}" => "Rock",
+            ReactionType::Unicode(ref val) if val == "\u{1F4F0}" => "Paper",
+            ReactionType::Unicode(ref val) if val == "\u{2702}" => "Scissors",
+            _ => return Ok(()),
+        };
+        let choices_a:Option<RpsGame> = diesel::update(dsl::rps_game.filter(
+            dsl::challenger_private_message_id.eq(SmartHax(reaction.message_id))
+        )).set(
+            dsl::challenger_choice.eq(choice)
+        ).returning(rps_game_select).get_result(&*conn).optional()?;
+        let choices_b:Option<RpsGame> = diesel::update(dsl::rps_game.filter(
+            dsl::receiver_private_message_id.eq(SmartHax(reaction.message_id))
+        )).set(
+            dsl::receiver_choice.eq(choice)
+        ).returning(rps_game_select).get_result(&*conn).optional()?;
+
+        let choices = if let Some(Some(game)) = choices_a.map(RpsGame::into_finished) {
+            Some(game)
+        } else if let Some(Some(game)) = choices_b.map(RpsGame::into_finished) {
+            Some(game)
+        } else { None };
+
+        if let Some(game) = choices {
+            let result = match (game.c_choice.as_str(), game.r_choice.as_str()) {
+                ("Rock", "Paper") => Winner::Receiver,
+                ("Rock", "Scissors") => Winner::Challenger,
+                ("Paper", "Scissors") => Winner::Receiver,
+                ("Paper", "Rock") => Winner::Challenger,
+                ("Scissors", "Rock") => Winner::Receiver,
+                ("Scissors", "Paper") => Winner::Challenger,
+                (c,r) if c == r => Winner::Draw,
+                _ => unreachable!(),
+            };
+
+            let challenger_choice_emoji = text_to_emoji(&game.c_choice);
+            let receiver_choice_emoji = text_to_emoji(&game.r_choice);
+            let result_text = match result {
+                Winner::Draw => "It's a draw!".to_string(),
+                Winner::Challenger => format!("{} wins!", UserId::from(game.challenger.0.try_into().unwrap():u64).mention()),
+                Winner::Receiver => format!("{} wins!", UserId::from(game.receiver.0.try_into().unwrap():u64).mention()),
+            };
+            ChannelId::from(game.game_location.0.try_into().unwrap():u64).say(&ctx, format!(
+                "Rock-paper-scissors game #{} has concluded, here are the results:\n||{} played {}\n{} played {}\n{}||",
+                game.rowid,
+                UserId::from(game.challenger.0.try_into().unwrap():u64).mention(),
+                challenger_choice_emoji,
+                UserId::from(game.receiver.0.try_into().unwrap():u64).mention(),
+                receiver_choice_emoji,
+                result_text,
+            ))?;
+        }
+        Ok(())
+    }
     fn archive_raw_event(&self, ctx: Context, ev: WsEvent) -> Result<(), CetrizineError> {
         use schema::raw_message::dsl;
         let conn = ctx.get_pool_arc().get()?;
@@ -1320,6 +1430,9 @@ impl Handler {
 }
 
 impl EventHandler for Handler {
+    fn reaction_add(&self, ctx: Context, add_reaction: Reaction) {
+        log_any_error!(self.reaction_add_result(ctx, add_reaction));
+    }
     fn ready(&self, ctx: Context, ready: Ready) {
         // Discord can send multiple readys! What the fuck discord!?
         // This is okay, at worst there'll be multiple channels to
