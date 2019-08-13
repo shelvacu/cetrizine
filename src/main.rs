@@ -121,6 +121,7 @@ mod command_log_macro;
 mod commands;
 mod attachments;
 mod error;
+mod rps;
 
 use db_types::*;
 use diesel::prelude::*;
@@ -448,7 +449,50 @@ impl Handler {
             dsl::challenger_choice,
             dsl::receiver_choice,
         );
+        if reaction.user_id == ctx.get_cache().read().user.id {
+            return Ok(())
+        }
         let conn = ctx.get_pool_arc().get()?;
+        if "\u{267b}".into():ReactionType == reaction.emoji {
+            //rematch
+            let data:Option<(i64,Snowflake,Snowflake,bool,bool)> = dsl::rps_game.filter(
+                dsl::gameover_message_id.eq(SmartHax(reaction.message_id)).and(
+                    dsl::challenger_user_id.eq(SmartHax(reaction.user_id)).or(
+                        dsl::receiver_user_id.eq(SmartHax(reaction.user_id))
+                    )
+                )
+            ).select((
+                dsl::rowid,
+                dsl::challenger_user_id,
+                dsl::receiver_user_id,
+                dsl::challenger_wants_rematch,
+                dsl::receiver_wants_rematch,
+            )).get_result(&*conn).optional()?;
+            if let Some((rowid, c_id, r_id, mut c_rm, mut r_rm)) = data {
+                if c_id.0 == reaction.user_id.0 as i64 {
+                    diesel::update(dsl::rps_game.filter(dsl::rowid.eq(rowid))).set(
+                        dsl::challenger_wants_rematch.eq(true)
+                    ).execute(&*conn)?;
+                    c_rm = true;
+                }
+                if r_id.0 == reaction.user_id.0 as i64 {
+                    diesel::update(dsl::rps_game.filter(dsl::rowid.eq(rowid))).set(
+                        dsl::receiver_wants_rematch.eq(true)
+                    ).execute(&*conn)?;
+                    r_rm = true;
+                }
+                if c_rm && r_rm {
+                    rps::start_game(
+                        &ctx,
+                        UserId::from(c_id.0 as u64),
+                        UserId::from(r_id.0 as u64),
+                        reaction.channel_id,
+                        reaction.channel_id.0 ^ reaction.message_id.0 ^ reaction.user_id.0,
+                    )?;
+                }
+            }
+            return Ok(())
+        }
         let choice = match reaction.emoji {
             ReactionType::Unicode(ref val) if val == "\u{1F5FF}" => "Rock",
             ReactionType::Unicode(ref val) if val == "\u{1F4F0}" => "Paper",
@@ -495,15 +539,25 @@ impl Handler {
                 Winner::Challenger => format!("{} wins!", UserId::from(game.challenger.0.try_into().unwrap():u64).mention()),
                 Winner::Receiver => format!("{} wins!", UserId::from(game.receiver.0.try_into().unwrap():u64).mention()),
             };
-            ChannelId::from(game.game_location.0.try_into().unwrap():u64).say(&ctx, format!(
-                "Rock-paper-scissors game #{} has concluded, here are the results:\n||{} played {}\n{} played {}\n{}||",
+
+            let game_over_message = format!(
+                "Rock-paper-scissors game #{} has concluded, here are the results:\n||{} played {}\n{} played {}\n{}||\nBoth players may press \u{267b} for a rematch!",
                 game.rowid,
                 UserId::from(game.challenger.0.try_into().unwrap():u64).mention(),
                 challenger_choice_emoji,
                 UserId::from(game.receiver.0.try_into().unwrap():u64).mention(),
                 receiver_choice_emoji,
                 result_text,
-            ))?;
+            );
+            let msg = ChannelId::from(game.game_location.0.try_into().unwrap():u64).send_message(&ctx, |cm| 
+                cm.content(game_over_message)
+                    .reactions(vec!["\u{267b}"])
+            )?;
+            diesel::update(dsl::rps_game.filter(
+                dsl::rowid.eq(game.rowid)
+            )).set(
+                dsl::gameover_message_id.eq(SmartHax(msg.id))
+            ).execute(&*conn)?;
         }
         Ok(())
     }

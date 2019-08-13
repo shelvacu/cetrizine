@@ -457,6 +457,9 @@ table! {
         receiver_private_message_id -> SQL_Snowflake,
         challenger_choice -> Nullable<Text>,
         receiver_choice -> Nullable<Text>,
+        gameover_message_id -> Nullable<SQL_Snowflake>,
+        challenger_wants_rematch -> Bool,
+        receiver_wants_rematch -> Bool,
     }
 }
 

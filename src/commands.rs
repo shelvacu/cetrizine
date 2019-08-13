@@ -226,77 +226,11 @@ impl FromCommandArgs for UserId {
 #[command]
 #[aliases("rpschallenge","rpsstart","rps_challenge","rps_start","rps challenge","rps start","\u{1F5FF}\u{1F4F0}\u{2702}","rps")]
 fn rps_start(ctx: &mut Context, msg: &Message, args: Args) -> CommandResult {
-    lazy_static!{
-        static ref EIGHTBALL_MESSAGES:[&'static str; 9] = [
-            "Winners pick snippers!",
-            "I'd prefer something solid.",
-            "Be thin and flexible.",
-            "Cut to the chase.",
-            "Hard to beat rock.",
-            "Take note.",
-            "Paper will never see it coming.",
-            "Scissors deserve to be bent",
-            "You've got this covered. \"this\" being a rock. Cover the rock.",
-        ];
-    }
-    use serenity::model::channel::ReactionType;
-    use schema::rps_game::dsl;
 
     let maybe_receiver_id = UserId::from_command_args(ctx, msg, args.rest());
     match maybe_receiver_id {
         Ok(receiver_id) => {
-            let eightball_msg = EIGHTBALL_MESSAGES[(msg.id.0 % EIGHTBALL_MESSAGES.len().try_into().unwrap():u64) as usize];
-            let common_text = format!(
-                "to a rock-paper-scissors duel! Pick your weapon: (\u{1F5FF} is what's used for \"rock\", there really isn't anything closer, sorry.)\n\nWisdom: {}",
-                eightball_msg,
-            );
-            let challenger_id = msg.author.id;
-            let challenger_channel = challenger_id.create_dm_channel(&ctx)?;
-            let challenger_msg = challenger_channel.send_message(&ctx, |cm|
-                cm.content(format!( 
-                    "You challenged {} {}", 
-                    receiver_id.mention(),
-                    &common_text,
-                ))
-                    .reactions(vec![
-                        "\u{1F5FF}",
-                        "\u{1F4F0}",
-                        "\u{2702}",
-                    ])
-            )?;
-
-            let receiver_channel = receiver_id.create_dm_channel(&ctx)?;
-            let receiver_msg = receiver_channel.send_message(&ctx, |cm|
-                cm.content(format!( 
-                    "You have been challenged by {} {}", 
-                    challenger_id.mention(),
-                    &common_text,
-                ))
-                    .reactions(vec![
-                        "\u{1F5FF}",
-                        "\u{1F4F0}",
-                        "\u{2702}",
-                    ])
-            )?;
-
-            let conn = ctx.get_pool_arc().get()?;
-            let rowid:i64 = diesel::insert_into(dsl::rps_game).values((
-                dsl::game_location_channel_id.eq(SmartHax(msg.channel_id)),
-                dsl::challenger_user_id.eq(SmartHax(challenger_id)),
-                dsl::receiver_user_id.eq(SmartHax(receiver_id)),
-                dsl::challenger_private_message_id.eq(SmartHax(challenger_msg.id)),
-                dsl::receiver_private_message_id.eq(SmartHax(receiver_msg.id)),
-            )).returning(dsl::rowid).get_result(&*conn)?;
-            msg.channel_id.say(
-                ctx,
-                format!(
-                    "{} has challenged {} to a rock-paper-scissors duel! {}\n\nGame #{}", 
-                    challenger_id.mention(),
-                    receiver_id.mention(),
-                    eightball_msg,
-                    rowid,
-                )
-            )?;
+            crate::rps::start_game(&ctx, msg.author.id, receiver_id, msg.channel_id, msg.id.0)?;
         },
         Err(err_msg) => {
             msg.reply(ctx, err_msg)?;
@@ -612,9 +546,7 @@ Note: You can always perform commands by pinging this bot at the beginning, eg:
 <@{3}> command
 
 Source code available at <https://github.com/shelvacu/cetrizine>
-
 App icon based on <https://icons8.com/icon/114217/floppy-disk>
-
 This {0} has Super Pony Powers",
             some_kind_of_uppercase_first_letter(env!("CARGO_PKG_NAME")),
             env!("CARGO_PKG_VERSION"),
