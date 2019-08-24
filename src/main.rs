@@ -13,19 +13,10 @@ extern crate backtrace;
 extern crate simplelog;
 extern crate multi_log;
 
-//Crates for sqlite -> postgres migration
-extern crate rusqlite as sqlite;
-extern crate pbr;
-
 //Main discord library
 extern crate serenity;
 
 //Database, database connection pooling
-extern crate r2d2_postgres;
-//#[macro_use]
-//extern crate postgres as pg;
-//#[macro_use]
-//extern crate postgres_derive;
 #[macro_use]
 extern crate diesel;
 
@@ -54,7 +45,7 @@ extern crate regex;
 
 use sha2::{Sha256,Digest};
 
-pub use r2d2_postgres::r2d2;
+pub use diesel::r2d2;
 
 use chrono::prelude::{DateTime,Utc};
 
@@ -140,7 +131,7 @@ lazy_static! {
     static ref SENT_REBOOT_NOTIF:StdMutex<bool> = StdMutex::new(false);
 }
 
-type DBPool = r2d2::Pool<crate::diesel::r2d2::ConnectionManager<diesel::pg::PgConnection>>;
+type DBPool = r2d2::Pool<r2d2::ConnectionManager<diesel::pg::PgConnection>>;
 type ArcPool = Arc<DBPool>;
 
 struct PoolArcKey;
@@ -452,7 +443,7 @@ impl Handler {
         if reaction.user_id == ctx.get_cache().read().user.id {
             return Ok(())
         }
-        let conn = ctx.get_pool_arc().get()?;
+        let conn = ctx.get_pool_arc().get()?;        
         if "\u{267b}".into():ReactionType == reaction.emoji {
             //rematch
             let data:Option<(i64,Snowflake,Snowflake,bool,bool)> = dsl::rps_game.filter(
@@ -1602,7 +1593,7 @@ DB migration version: {}",
             ap.parse_args_or_exit()
         }
 
-        let manager = diesel::r2d2::ConnectionManager::new(postgres_path.as_str());
+        let manager = r2d2::ConnectionManager::new(postgres_path.as_str());
         let pool = r2d2::Pool::new(manager).unwrap();
 
         let simple_logger_config = simplelog::Config{

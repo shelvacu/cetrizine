@@ -11,3 +11,4 @@
 - [ ] Archive server audit logs (they only last 90 days! D:)
 - [ ] Archive channel invites
 - [ ] Archive channel webhooks
+- [ ] "    (kind in ('Binary', 'Ping', 'Pong') AND content_text IS NULL AND content_binary IS NULL)" 7to8.sql FIX it

@@ -7,7 +7,6 @@ use crate::{
     ShardManagerArcKey,
     db_types::SmartHax,
     r2d2,
-    r2d2_postgres,
     diesel::prelude::*,
     ArcPool,
     schema,

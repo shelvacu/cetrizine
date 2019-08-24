@@ -31,7 +31,6 @@ const MIGRATIONS:&[MigrationSpec] = &[
     Normal(include_str!("migrations/17to18-fix-fuckup.sql")), //17
     Normal(include_str!("migrations/18to19-rock-paper-scissors.sql")), //18
     Normal(include_str!("migrations/19to20-rps-rematch.sql")), //19
-    //SELECT MIN(a.rowid) as new_rowid, b.rowid as old_rowid, MAX(a.sha256sum_hex) FROM download_data as a, download_data as b WHERE a.sha256sum_hex = b.sha256sum_hex AND a.rowid < b.rowid GROUP BY b.rowid;
 ];
 
 pub const CURRENT_MIGRATION_VERSION:usize = MIGRATIONS.len();

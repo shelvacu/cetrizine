@@ -1,10 +1,8 @@
 use std::convert::TryInto;
 use log::{Record, Level, Metadata};
 use chrono;
-use r2d2_postgres::r2d2;
-//use crate::chrono;
-//use crate::r2d2;
-use r2d2_postgres::PostgresConnectionManager;
+use crate::r2d2;
+use r2d2::ConnectionManager;
 use crate::diesel::prelude::*;
 use super::EnumIntoString;
 use super::SESSION_ID;

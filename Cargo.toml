@@ -11,7 +11,6 @@ vergen = "3"
 sha2 = "0.7"
 chrono = "0.4"
 time = "0.1.42"
-r2d2_postgres = "0.14"
 argparse = "~0.2"
 postgres-derive = "0.3"
 pbr = "~1.0"
@@ -30,14 +29,6 @@ flate2 = "1.0"
 regex = "1"
 serde_json = "1.0"
 serde = { version = "1.0", features = ["derive"] }
-
-[dependencies.rusqlite]
-version = "~0.18.0"
-features = ["chrono","unlock_notify","bundled"]
-
-[dependencies.postgres]
-version = "~0.15.2"
-features = ["with-serde_json","with-time","with-chrono"]
 
 [dependencies.serenity]
 version = "=0.6.2-shel4"
