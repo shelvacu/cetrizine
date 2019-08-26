@@ -1596,13 +1596,10 @@ DB migration version: {}",
         let manager = r2d2::ConnectionManager::new(postgres_path.as_str());
         let pool = r2d2::Pool::new(manager).unwrap();
 
-        let simple_logger_config = simplelog::Config{
-            time: Some(simplelog::Level::Info),
-            level: Some(simplelog::Level::Info),
-            target: Some(simplelog::Level::Info),
-            location: Some(simplelog::Level::Info),
-            .. Default::default()
-        };
+        let simple_logger_config = simplelog::ConfigBuilder::new()
+            .set_target_level(simplelog::LevelFilter::Error)
+            .set_location_level(simplelog::LevelFilter::Error)
+            .build();
         let simple_logger = simplelog::SimpleLogger::new(simplelog::LevelFilter::Info, simple_logger_config);
         let pg_logger = Box::new(
             postgres_logger::PostgresLogger::new(
