@@ -14,7 +14,22 @@ impl CetrizineError {
             backtrace: Backtrace::new(),
         }
     }
+
+    fn custom(s: String) -> Self {
+        Self::new(CetrizineErrorType::Custom(CustomError(s)))
+    }
 }
+
+#[derive(Debug)]
+pub struct CustomError(String);
+
+impl std::fmt::Display for CustomError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl std::error::Error for CustomError {}
 
 macro_rules! error_type {
     ( $enum_ty:ident, $struct_ty:ident, {
@@ -50,11 +65,18 @@ error_type! {
         Serenity(serenity::Error),
         Io(std::io::Error),
         SerdeJson(serde_json::Error),
+        Custom(CustomError),
     }
 }
 
 impl std::fmt::Display for CetrizineError {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         write!(f, "{:?}", self)
+    }
+}
+
+impl From<String> for CetrizineError {
+    fn from(s: String) -> Self {
+        Self::custom(s)
     }
 }

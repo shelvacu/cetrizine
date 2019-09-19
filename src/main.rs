@@ -56,7 +56,6 @@ use serenity::{
     client::bridge::gateway::{
         event::ShardStageUpdateEvent,
         ShardManager,
-        //ShardId,
     },
 };
 
@@ -79,14 +78,14 @@ use std::time::Duration;
 macro_rules! pg_insert_helper {
     ( $db:expr, $table_name:ident, $( $column_name:ident => $column_value:expr , )+ ) => {{
         use schema::$table_name::dsl;
-        diesel::insert_into(dsl::$table_name)
+        crate::diesel::insert_into(dsl::$table_name)
             .values((
                 $(
                     dsl::$column_name.eq($column_value),
                 )+
             ))
             .returning(dsl::rowid)
-            .get_result($db):Result<i64,diesel::result::Error>
+            .get_result($db):Result<i64,crate::diesel::result::Error>
     }};
 }
 
@@ -102,17 +101,16 @@ macro_rules! log_any_error {
     }};
 }
 
-//mod legacy; //this *must* come after the pg_insert_helper macro
-mod db_types;
-mod migrations;
-mod schema;
-mod postgres_logger;
+pub mod db_types;
+pub mod migrations;
+pub mod schema;
+pub mod postgres_logger;
 #[macro_use]
-mod command_log_macro;
-mod commands;
-mod attachments;
-mod error;
-mod rps;
+pub mod command_log_macro;
+pub mod commands;
+pub mod attachments;
+pub mod error;
+pub mod rps;
 
 use db_types::*;
 use diesel::prelude::*;
@@ -265,12 +263,12 @@ macro_rules! enum_stringify {
     };
 }
 
-enum_stringify!{ serenity::model::channel::MessageType => Regular, GroupRecipientAddition, GroupRecipientRemoval, GroupCallCreation, GroupNameUpdate, GroupIconUpdate, PinsAdd, MemberJoin, UserPremiumGuildSubscription, UserPremiumGuildSubscriptionTier1, UserPremiumGuildSubscriptionTier2, UserPremiumGuildSubscriptionTier3 }
+enum_stringify!{ serenity::model::channel::MessageType => Regular, GroupRecipientAddition, GroupRecipientRemoval, GroupCallCreation, GroupNameUpdate, GroupIconUpdate, PinsAdd, MemberJoin, NitroBoost, NitroTier1, NitroTier2, NitroTier3 }
 enum_stringify!{ serenity::model::guild::DefaultMessageNotificationLevel => All, Mentions }
 enum_stringify!{ serenity::model::guild::ExplicitContentFilter => None, WithoutRole, All }
 enum_stringify!{ serenity::model::guild::MfaLevel => None, Elevated }
 enum_stringify!{ serenity::model::guild::VerificationLevel => None, Low, Medium, High, Higher }
-enum_stringify!{ serenity::model::channel::ChannelType => Text, Private, Voice, Group, Category, News }
+enum_stringify!{ serenity::model::channel::ChannelType => Text, Private, Voice, Group, Category, News, Store }
 enum_stringify!{ serenity::model::gateway::ActivityType => Playing, Streaming, Listening }
 enum_stringify!{ serenity::model::user::OnlineStatus => DoNotDisturb, Idle, Invisible, Offline, Online }
 enum_stringify!{ serenity::gateway::ConnectionStage => Connected, Connecting, Disconnected, Handshake, Identifying, Resuming }
@@ -284,6 +282,7 @@ impl EnumIntoString for serenity::WsMessage {
             Binary(_) => "Binary",
             Ping(_) => "Ping",
             Pong(_) => "Pong",
+            Close(_) => "Close", //change schema, see 7to8.sql
         }
     }
     fn from_str(_input: &str) -> Option<Self> { None }
@@ -320,6 +319,7 @@ impl OwnedMessageExt for serenity::WsMessage {
             Binary(d) => BinaryData(Some(d)),
             Ping(d) => BinaryData(Some(d)),
             Pong(d) => BinaryData(Some(d)),
+            Close(_) => BinaryData(None), //TODO: There is a close reason in the data but whatever
         }
     }
 }
@@ -440,7 +440,7 @@ impl Handler {
             dsl::challenger_choice,
             dsl::receiver_choice,
         );
-        if reaction.user_id == ctx.get_cache().read().user.id {
+        if reaction.user_id == ctx.cache().read().user.id {
             return Ok(())
         }
         let conn = ctx.get_pool_arc().get()?;        
@@ -1149,6 +1149,7 @@ impl Handler {
                 Group => (),
                 Category => continue,
                 News => (),
+                Store => (), // I don't *think* a store has any messages, but the discord docs are hella unclear, as per usual.
             }
 
             let uid = USER_ID.load(Ordering::Relaxed);
@@ -1156,7 +1157,7 @@ impl Handler {
                 warn!("USER_ID was read as 0.");
             }
 
-            let perms = guild.permissions_in(chan_id, UserId(uid));
+            let perms = guild.user_permissions_in(chan_id, UserId(uid));
             if !perms.read_message_history() {
                 info!("Skipping {}, cannot read message history", chan.name);
                 continue;
@@ -1182,15 +1183,30 @@ impl Handler {
         let mut private_channels_to_archive:Vec<ChannelId> = Vec::new();
         let rdy = &rdy;
         conn.transaction(|| {
+            let dbscu = DbSerenityCurrentUser::from(rdy.user.clone());
+            // info!("current_user is {:#?}", &dbscu);
+            // use diesel::sql_types::{Text, Integer};
+
+            // #[derive(QueryableByName)]
+            // struct Blarg {
+            //     #[sql_type = "Text"]
+            //     blarg: String
+            // }
+            // // let debug_res:Blarg = diesel::sql_query("SELECT $1::text as blarg;").bind::<Integer, _>(3).get_result(conn)?;
+            // let debug_res:Blarg = diesel::sql_query("SELECT $1::text as blarg;").bind::<SQL_SerenityCurrentUser, _>(&dbscu).get_result(conn)?;
+            // // let debug_res:Blarg = diesel::sql_query("SELECT (").bind::<SQL_SerenityCurrentUser, _>(&dbscu).sql(")::text as blarg;").get_result(conn)?;
+            // debug!("postgres thinks its {}", debug_res.blarg);
+            // std::process::exit(1);
             ready_rowid = pg_insert_helper!(
                 conn, ready,
-                session_id => rdy.session_id.filter_null(),
+                session_id => &rdy.session_id, //rdy.session_id.filter_null(),
                 shard => rdy.shard.map(|a| vec![
                     a[0].try_into().unwrap():i64,
                     a[1].try_into().unwrap():i64,
                 ]),
-                trace => rdy.trace.iter().map(|s| s.filter_null()).collect():Vec<_>,
-                user_info => DbSerenityCurrentUser::from(rdy.user.clone()),
+                // trace => rdy.trace.iter().map(|s| s.filter_null()).collect():Vec<_>,
+                trace => rdy.trace.iter().collect():Vec<_>,
+                user_info => dbscu,
                 version => rdy.version.try_into().unwrap():i64,
             )?;
 
@@ -1424,7 +1440,7 @@ impl Handler {
         let user_id = UserId(USER_ID.load(Ordering::Relaxed));
         if let Some(guild_lock) = maybe_guild_lock.as_ref() {
             let guild = guild_lock.read();
-            if guild.permissions_in(new.id(), user_id).read_message_history() {
+            if guild.user_permissions_in(new.id(), user_id).read_message_history() {
                 channel_archiver_sender.send((
                     new.clone(),
                     guild.name.clone(),
@@ -1448,8 +1464,8 @@ impl Handler {
             let guild = guild_lock.read();
             for chan_id in guild.channels.keys() {
                 debug!("Rechecking perms for chan id {:?}", chan_id);
-                if guild.permissions_in(chan_id, my_id).read_message_history() {
-                    let new_chan = ctx.get_http().get_channel(chan_id.0)?;
+                if guild.user_permissions_in(chan_id, my_id).read_message_history() {
+                    let new_chan = ctx.http().get_channel(chan_id.0)?;
                     debug!("Rechecking found we can read messages in {:?}; chan is {:?}", chan_id, new_chan);
                     channel_archiver_sender.send((
                         new_chan.clone(),
@@ -1461,7 +1477,7 @@ impl Handler {
         } else { warn!("Guild {:?} not found in cache", guild_id); }
 
         for new_chan in new_chans {
-            let mut cache = ctx.get_cache().write();
+            let mut cache = ctx.cache().write();
             let _old = cache.insert_channel(&new_chan);
         }
 
@@ -1600,7 +1616,7 @@ DB migration version: {}",
             .set_target_level(simplelog::LevelFilter::Error)
             .set_location_level(simplelog::LevelFilter::Error)
             .build();
-        let simple_logger = simplelog::SimpleLogger::new(simplelog::LevelFilter::Info, simple_logger_config);
+        let simple_logger = simplelog::SimpleLogger::new(simplelog::LevelFilter::Debug, simple_logger_config);
         let pg_logger = Box::new(
             postgres_logger::PostgresLogger::new(
                 pool.clone(),

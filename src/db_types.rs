@@ -59,6 +59,12 @@ macro_rules! snowflake_impl {
                 <Self as std::convert::From<u64>>::from(s.0.try_into().unwrap())
             }
         }
+
+        /* impl FromSql<SQL_Snowflake, Pg> for $klass {
+            fn from_sql(bytes: Option<&[u8]>) -> deserialize::Result<Self> {
+                <Snowflake as FromSql::<SQL_Snowflake, Pg>>::from_sql(bytes).map(Self::from)
+            }
+        } */
     };
 }
 
@@ -144,8 +150,9 @@ where
         i64::from_le_bytes(self.0.bits().to_le_bytes()).to_sql(out)
     }
 }
-
 // FromSql serenity::model::permissions::Permissions::from_bits_truncate(val_u)
+
+
 
 /// Columns **must** be in the same order as database
 // based on https://github.com/diesel-rs/diesel/issues/1732
@@ -162,11 +169,18 @@ macro_rules! composite_type {
         }
 
         impl ::diesel::serialize::ToSql<$sql_type_type, ::diesel::pg::Pg> for $struct_name {
-            fn to_sql<W: ::std::io::Write>(&self, out: &mut ::diesel::serialize::Output<W, ::diesel::pg::Pg>) -> ::diesel::serialize::Result {
-                ::diesel::serialize::WriteTuple::<($($sql_ty,)+)>::write_tuple(
+            fn to_sql<W: ::std::io::Write>(&self, their_out: &mut ::diesel::serialize::Output<W, ::diesel::pg::Pg>) -> ::diesel::serialize::Result {
+                // let mut out_buf = ;
+                // let mut our_out = diesel::serialize::Output::new(out_buf, their_out.metadata_lookup());
+                let mut our_out = their_out.with_buffer(Vec::<u8>::new());
+                let res = ::diesel::serialize::WriteTuple::<($($sql_ty,)+)>::write_tuple(
                     &( $( &self . $rust_column_name , )+ ),
-                    out,
-                )
+                    &mut our_out,
+                )?;
+                let out_buf = our_out.into_inner();
+                // debug!("ToSql'd {:?} into {:x?}, with res {:?}", self, out_buf, res);
+                their_out.write_all(&out_buf)?;
+                Ok(res)
             }
         }
 
@@ -347,7 +361,7 @@ composite_type! {
     roles -> Array<SQL_Snowflake> : Vec<Snowflake>,
 }
 
-#[derive(Debug, SqlType)]
+#[derive(Debug, SqlType, QueryId)]
 #[postgres(type_name = "serenity_current_user")]
 pub struct SQL_SerenityCurrentUser;
 
