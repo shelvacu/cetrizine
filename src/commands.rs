@@ -411,7 +411,7 @@ command_log!(
 );
 
 command_log!(
-    #[aliases("raw message","rawmessage")]
+    #[aliases("raw message","rawmessage","sendraw","rawsend")]
     fn raw_message(ctx, message, args) {
         let channel_id:u64 = args.single()?;
         let message_to_send_content = args.rest();
