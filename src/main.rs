@@ -1,4 +1,4 @@
-#![feature(nll,const_slice_len,option_flattening,type_ascription,param_attrs)]
+#![feature(type_ascription)]
 #![deny(unused_must_use)]
 #![allow(clippy::mutex_atomic,unused_imports,non_camel_case_types)]
 #![recursion_limit="1024"]
@@ -124,7 +124,7 @@ static USER_ID:AtomicU64 = AtomicU64::new(0);
 lazy_static! {
     static ref DO_RE_EXEC:StdMutex<Option<u64>> = StdMutex::new(None);
 }
-//I really *do* want a bool in a mutex, since I want to send the reboot message exactly once and record that it's been sent, just in case discord sneezes and sends two Readys in quick succession. This *could* be implemented as two statics, an AtomicBool and a Mutex<()>, but the code using this doesn't need to be anywhere near performant.
+//I really *do* want a bool in a mutex, since I want to send the reboot message exactly once and record that it's been sent, just in case discord sneezes and sends two Readys in quick succession. This *could* be implemented as two statics (I think), an AtomicBool and a Mutex<()>, but the code using this doesn't need to be anywhere near performant so the complexity isn't worth it.
 lazy_static! {
     static ref SENT_REBOOT_NOTIF:StdMutex<bool> = StdMutex::new(false);
 }
@@ -1298,7 +1298,7 @@ impl Handler {
     } //fn grab_archive ...
     
     fn message_result(&self, ctx: Context, msg: Message) -> Result<(), CetrizineError> {
-        let handler_start = Utc::now();
+        let handler_start = ctx.raw_event.expect("Should be eventful").happened_at_chrono;
         let conn = ctx.get_pool_arc().get()?;
         let guild_str;
         if let Some(guild_id) = msg.guild_id {
@@ -1403,13 +1403,13 @@ impl Handler {
         Ok(())
     }
 
-    fn _channel_create(&self, ctx: Context, channel_lock: Arc<RwLock<GuildChannel>>) -> Result<(), CetrizineError> {
-        let _recvd_at = Utc::now();
-        let _conn = ctx.get_pool_arc().get()?;
-        let chan = channel_lock.read();
-        info!("Chan create! {:?}", chan.name);
-        Ok(())
-    }
+    // fn _channel_create(&self, ctx: Context, channel_lock: Arc<RwLock<GuildChannel>>) -> Result<(), CetrizineError> {
+    //     let _recvd_at = Utc::now();
+    //     let _conn = ctx.get_pool_arc().get()?;
+    //     let chan = channel_lock.read();
+    //     info!("Chan create! {:?}", chan.name);
+    //     Ok(())
+    // }
 
     fn record_shard_stage_update(&self, ctx: Context, ssue: ShardStageUpdateEvent) -> Result<(), CetrizineError> {
         let conn = ctx.get_pool_arc().get()?;
@@ -1442,13 +1442,13 @@ impl Handler {
             let guild = guild_lock.read();
             if guild.user_permissions_in(new.id(), user_id).read_message_history() {
                 channel_archiver_sender.send((
-                    new.clone(),
+                    new,
                     guild.name.clone(),
                 )).unwrap();
             }
         } else {
             channel_archiver_sender.send((
-                new.clone(),
+                new,
                 String::from(""),
             )).unwrap();
         }

@@ -12,7 +12,7 @@ use crate::{
 };
 use std::convert::TryInto;
 
-const EIGHTBALL_MESSAGES:&'static [&'static str] = &[
+const EIGHTBALL_MESSAGES:&[&str] = &[
     "Winners pick snippers!",
     "I'd prefer something solid.",
     "Be thin and flexible.",

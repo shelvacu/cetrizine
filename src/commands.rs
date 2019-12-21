@@ -22,6 +22,7 @@ use serenity::{
     }
 };
 
+use chrono::Utc;
 use regex::Regex;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -73,7 +74,26 @@ fn inner_dynamic_prefix(
     }
 }
 
+lazy_static! {
+    static ref USER_PING_RE: Regex = Regex::new(r"^\s*<@!?(\d+)>\s*$").unwrap();
+    static ref CHANNEL_PING_RE: Regex = Regex::new(r"^\s*<#(\d+)>\s*$").unwrap();
+    static ref CUSTOM_EMOJI_RE: Regex = Regex::new(r#"^\s*<a?:[^: '">]*:(\d+)>"#)
+    static ref MSG_URL_RE: Regex = Regex::new(r"^\s*https://discordapp.com/channels/(?P<server_id>@me|\d+)/(?P<channel_id>\d+)/(?P<message_id>\d+)\s*$").unwrap();
+    static ref CHANNEL_URL_RE: Regex = Regex::new(r"^\s*https://discordapp.com/channels/(?P<server_id>@me|\d+)/(?P<channel_id>\d+)\s*$").unwrap();
+}
+
+// f**k IDs:
+// <a:fk:657813786236813314>
+// <:fkstill:657815565452443667>
+const FK_ANIM_EMOJI_ID:u64 = 657813786236813314;
+const FK_STIL_EMOJI_ID:u64 = 657815565452443667;
+
 pub fn cetrizine_framework(my_id: UserId) -> StandardFramework {
+    //Init lazy static values, so that any errors happen on program start instead of when some command is invoked.
+    lazy_static::initialize(&USER_PING_RE);
+    lazy_static::initialize(&CHANNEL_PING_RE);
+    lazy_static::initialize(&MSG_URL_RE);
+    lazy_static::initialize(&CHANNEL_URL_RE);
     let owners = vec![
         #[allow(clippy::unreadable_literal)] //This literal isn't meant to be read, it's an ID
         UserId(165858230327574528)
@@ -125,6 +145,7 @@ group!({
     commands: [
         archive_channel,
         unarchive_channel,
+        move_messages,
     ],
 });
 
@@ -169,9 +190,6 @@ trait FromCommandArgs : Sized {
 
 impl FromCommandArgs for UserId {
     fn from_command_args(ctx: &Context, msg: &Message, arg: &str) -> Result<Self, &'static str> {
-        lazy_static! {
-            static ref USER_PING_RE: Regex = Regex::new(r"^\s*<@!?(\d+)>\s*$").unwrap();
-        }
         if arg == "." || arg == "self" {
             return Ok(msg.author.id);
         }
@@ -226,6 +244,40 @@ impl FromCommandArgs for UserId {
     }
 }
 
+impl FromCommandArgs for MessageId {
+    fn from_command_args(_ctx: &Context, msg: &Message, arg: &str) -> Result<Self, &'static str> {
+        if arg == "." || arg == "this" || arg == "" {
+            return Ok(msg.id);
+        }
+        if let Some(ma) = MSG_URL_RE.captures(arg) {
+            let id:u64 = ma.name("message_id").unwrap().as_str().parse().map_err(|_| "Could not parse url")?;
+            return Ok(MessageId::from(id));
+        }
+        if let Ok(id) = arg.parse():Result<u64,_> {
+            return Ok(MessageId::from(id));
+        }
+        Err("Could not find any such Message.")
+    }
+}
+
+impl FromCommandArgs for ChannelId {
+    fn from_command_args(_ctx: &Context, msg: &Message, arg: &str) -> Result<Self, &'static str> {
+        if arg == "." || arg == "this" || arg == "" {
+            return Ok(msg.channel_id);
+        }
+        if let Some(ma) = CHANNEL_PING_RE.captures(arg) {
+            let id:u64 = ma.get(1).unwrap().as_str().parse().map_err(|_| "Could not parse channel id")?;
+            return Ok(ChannelId::from(id));
+        }
+        if let Some(ma) = CHANNEL_URL_RE.captures(arg) {
+            let id:u64 = ma.name("channel_id").unwrap().as_str().parse().map_err(|_| "Could not parse url")?;
+            return Ok(ChannelId::from(id));
+        }
+        let parse_result = arg.parse():Result<u64,_>;
+        parse_result.map_err(|_| "Could not find Channel.").map(ChannelId::from)
+    }
+}
+
 #[command]
 #[aliases("rpschallenge","rpsstart","rps_challenge","rps_start","rps challenge","rps start","\u{1F5FF}\u{1F4F0}\u{2702}","rps")]
 fn rps_start(ctx: &mut Context, msg: &Message, args: Args) -> CommandResult {
@@ -243,146 +295,171 @@ fn rps_start(ctx: &mut Context, msg: &Message, args: Args) -> CommandResult {
     Ok(())
 }
 
+#[command]
+fn move_messages(ctx: &mut Context, msg: &Message, mut args: Args) -> CommandResult {
+    let args_norm = match args.iter::<String>().collect():Result<Vec<_>, _> {
+        Ok(v) => v,
+        Err(_) => unreachable!(), //this can't actually happen...
+    };
+    if args_norm.len() < 2 {
+        msg.reply(ctx, "Err: At least two arguments required.")?;
+        return Ok(());
+    }
+    let chan_id = match ChannelId::from_command_args(ctx, msg, args_norm.last().unwrap()) {
+        Ok(v) => v,
+        Err(e) => {
+            msg.reply(ctx, e)?;
+            return Ok(());
+        }
+    };
+    let mesg_ids = match (&args_norm[0..args_norm.len()-1]).iter().map(|arg| MessageId::from_command_args(ctx, msg, arg)).collect():Result<Vec<_>,_> {
+        Ok(v) => v,
+        Err(e) => {
+            msg.reply(ctx, e)?;
+            return Ok(());
+        }
+    };
+    let start = Utc::now();
+    for id in mesg_ids {
+        chan_id.send_message(&ctx, |m| m.content(format!("{}", id.into():u64)))?;
+    }
+    msg.reply(ctx, format!("Took {:?} to send all those messages", Utc::now() - start))?;
+    Ok(())
+}
+
+fn unarchive_channel_impl(ctx: &mut Context, msg:&Message, args:String) -> Result<(),&'static str> {
+    use schema::chan_archival::dsl;
+    use crate::db_types::Snowflake;
+    #[derive(Queryable,Debug)]
+    struct ChanArchival {
+        rowid: i64,
+        from_cat_id: Option<Snowflake>,
+        to_cat_id: Option<Snowflake>,
+        moved_chan_id: Snowflake,
+        dir_is_archiving: bool,
+        command_msg_id: Snowflake,
+        done: bool,
+        failed: bool,
+    }
+    if let Some(chan_to_unarchive) = ChannelId::from_command_args(ctx, msg, args) {
+        let conn = ctx.get_pool_arc().get()?;
+        let curr_chan_cat = chan_to_unarchive
+            .to_channel_cached(&ctx)
+            .ok_or_else(|| "Expected channel to be cached".to_string())?
+            .guild().ok_or_else(|| "Expected channel to be a GuildChannel".to_string())?
+            .read()
+            .category_id;
+        let maybe_ca:Option<ChanArchival> = dsl::chan_archival.filter(
+            (
+                dsl::moved_chan_id.eq(SmartHax(msg.channel_id))
+            ).and(
+                diesel::dsl::not(dsl::failed)
+            ).and(
+                dsl::dir_is_archiving
+            )
+        ).order(dsl::command_msg_id.desc()).limit(1).get_result(&conn).optional()?;
+        if let Some(ca) = maybe_ca {
+            if curr_chan_cat != ca.to_cat_id.map(ChannelId::from) {
+                msg.reply(&ctx, "Channel has moved since being archived, cannot determine where to un-archive to.")?;
+            }else{
+                let to_cat = ca.from_cat_id.map(ChannelId::from);
+                let ca_id = pg_insert_helper!(
+                    &conn, chan_archival,
+                    from_cat_id => SmartHaxO(curr_chan_cat),
+                    to_cat_id => SmartHaxO(to_cat),
+                    moved_chan_id => SmartHax(msg.channel_id),
+                    dir_is_archiving => false,
+                    command_msg_id => SmartHax(msg.id),
+                    done => false,
+                    failed => false,
+                )?;
+                msg.channel_id.edit(&ctx, |ec| ec.category(to_cat)).map_err(|e| {
+                    //We don't actually change the error, we just use this to do something only if an error occurs, after the error occurs, before returning.
+                    log_any_error!(diesel::update(dsl::chan_archival.filter(dsl::rowid.eq(ca_id))).set(dsl::failed.eq(true)).execute(&conn));
+                    e
+                })?;
+                diesel::update(dsl::chan_archival.filter(dsl::rowid.eq(ca_id))).set(dsl::done.eq(true)).execute(&conn)?;
+                msg.reply(&ctx, "Channel un-archived")?;
+            }
+        } else {
+            msg.reply(&ctx, "Cannot find any archivals of this channel.")?;
+        }
+    } else {
+        msg.reply(&ctx, "Could not find specified channel.")?;
+    }
+    Ok(())
+}
+
 //#[command]
 command_log!(
-    #[aliases("unarchivechan","unarchive channel","unarchivechannel")]
+    #[aliases("unarchivechan","unarchive channel","unarchivechannel","unarchive")]
 //    fn unarchive_channel(ctx: &mut Context, msg: &Message, args: Args) -> CommandResult {
-    fn unarchive_channel(ctx, msg, args) {
-        use schema::chan_archival::dsl;
-        use crate::db_types::Snowflake;
-        #[derive(Queryable,Debug)]
-        struct ChanArchival {
-            rowid: i64,
-            from_cat_id: Option<Snowflake>,
-            to_cat_id: Option<Snowflake>,
-            moved_chan_id: Snowflake,
-            dir_is_archiving: bool,
-            command_msg_id: Snowflake,
-            done: bool,
-            failed: bool,
-        }
-        if args.is_empty() || args.rest() == "." {
-            let conn = ctx.get_pool_arc().get()?;
-            let curr_chan_cat = msg
-                .channel_id
-                .to_channel_cached(&ctx)
-                .ok_or("Expected channel to be cached".to_string())?
-                .guild().ok_or("Expected channel to be a GuildChannel".to_string())?
-                .read()
-                .category_id;
-            // let maybe_archive_channel_id:Option<serenity::model::id::ChannelId> = ctx
-            //     .cache()
-            //     .read()
-            //     .guilds[&msg.guild_id.unwrap()]
-            //     .read()
-            //     .channels
-            //     .values()
-            //     .find(|&chan_lock| {
-            //         let chan = chan_lock.read();
-            //         chan.kind == serenity::model::channel::ChannelType::Category && chan.name.to_ascii_uppercase() == "ARCHIVED"
-            //     })
-            //     .map(|chan_lock| chan_lock.read().id);
-            let maybe_ca:Option<ChanArchival> = dsl::chan_archival.filter(
-                (
-                    dsl::moved_chan_id.eq(SmartHax(msg.channel_id))
-                ).and(
-                    diesel::dsl::not(dsl::failed)
-                ).and(
-                    dsl::dir_is_archiving
-                )
-            ).order(dsl::command_msg_id.desc()).limit(1).get_result(&conn).optional()?;
-            if let Some(ca) = maybe_ca {
-                if curr_chan_cat != ca.to_cat_id.map(ChannelId::from) {
-                    msg.reply(&ctx, "Channel has moved since being archived, cannot determine where to un-archive to.")?;
-                }else{
-                    let to_cat = ca.from_cat_id.map(ChannelId::from);
-                    let ca_id = pg_insert_helper!(
-                        &conn, chan_archival,
-                        from_cat_id => SmartHaxO(curr_chan_cat),
-                        to_cat_id => SmartHaxO(to_cat),
-                        moved_chan_id => SmartHax(msg.channel_id),
-                        dir_is_archiving => false,
-                        command_msg_id => SmartHax(msg.id),
-                        done => false,
-                        failed => false,
-                    )?;
-                    msg.channel_id.edit(&ctx, |ec| ec.category(to_cat)).map_err(|e| {
-                        //We don't actually change the error, we just use this to do something only if an error occurs, after the error occurs, before returning.
-                        log_any_error!(diesel::update(dsl::chan_archival.filter(dsl::rowid.eq(ca_id))).set(dsl::failed.eq(true)).execute(&conn));
-                        e
-                    })?;
-                    diesel::update(dsl::chan_archival.filter(dsl::rowid.eq(ca_id))).set(dsl::done.eq(true)).execute(&conn)?;
-                    msg.reply(&ctx, "Channel un-archived")?;
-                }
-            } else {
-                msg.reply(&ctx, "Cannot find any archivals of this channel.")?;
-            }
-        } else {
-            msg.reply(&ctx, "This command does not (yet) work on anything but the channel the command is sent in.")?;
-        }
-        Ok(())
+    fn unarchive_channel(ctx,msg,args) {
+        unarchive_channel_impl(ctx, msg, args.rest())
     }
+    
 );
 
-command_log!(
-    #[aliases("archivechannel","archive channel","archivechan")]
-    fn archive_channel(ctx, msg, args) {
-//    #[command]
-//    fn archive_channel(ctx: &mut Context, msg: &Message, args: Args) -> CommandResult {
-        use schema::chan_archival::dsl;
-        if args.is_empty() || args.rest() == "." {
-            let curr_chan_cat = msg
-                .channel_id
-                .to_channel_cached(&ctx)
-                .ok_or("Expected channel to be cached".to_string())?
-                .guild().ok_or("Expected channel to be a GuildChannel".to_string())?
-                .read()
-                .category_id;
-            let maybe_archive_channel_id:Option<serenity::model::id::ChannelId> = ctx
-                .cache()
-                .read()
-                .guilds[&msg.guild_id.unwrap()]
-                .read()
-                .channels
-                .values()
-                .find(|&chan_lock| {
-                    let chan = chan_lock.read();
-                    let uppername = chan.name.to_ascii_uppercase();
-                    chan.kind == serenity::model::channel::ChannelType::Category && (
-                        uppername == "ARCHIVED" || uppername == "ARCHIVE"
-                    )
-                })
-                .map(|chan_lock| chan_lock.read().id);
-            if let Some(archive_channel_id) = maybe_archive_channel_id {
-                if Some(archive_channel_id) != curr_chan_cat {
-                    let conn = ctx.get_pool_arc().get()?;
-                    let ca_id = pg_insert_helper!(
-                        &conn, chan_archival,
-                        from_cat_id => curr_chan_cat.map(SmartHax),
-                        to_cat_id => SmartHax(archive_channel_id),
-                        moved_chan_id => SmartHax(msg.channel_id),
-                        dir_is_archiving => true,
-                        command_msg_id => SmartHax(msg.id),
-                        done => false,
-                        failed => false,
-                    )?;
-                    msg.channel_id.edit(&ctx, |ec| ec.category(archive_channel_id)).map_err(|e| {
-                        //We don't actually change the error, we just use this to do something only if an error occurs, after the error occurs, before returning.
-                        log_any_error!(diesel::update(dsl::chan_archival.filter(dsl::rowid.eq(ca_id))).set(dsl::failed.eq(true)).execute(&conn));
-                        e
-                    })?;
-                    diesel::update(dsl::chan_archival.filter(dsl::rowid.eq(ca_id))).set(dsl::done.eq(true)).execute(&conn)?;
-                    msg.reply(&ctx, "Channel archived")?;
-                }else{
-                    msg.reply(&ctx, "Channel is already archived!")?;
-                }
-            } else {
-                msg.reply(&ctx, "Error: Could not find archive channel.")?;
+fn archive_channel_impl(ctx: &mut Context, msg:&Message, args:&str) -> Result<(),&'static str> {
+    use schema::chan_archival::dsl;
+    if let Some(chan_to_archive) = ChannelId::from_command_args(ctx, msg, args) {
+        let curr_chan_cat = chan_to_archive
+            .to_channel_cached(&ctx)
+            .ok_or_else(|| "Expected channel to be cached".to_string())?
+            .guild().ok_or_else(|| "Expected channel to be a GuildChannel".to_string())?
+            .read()
+            .category_id;
+        let maybe_archive_channel_id:Option<serenity::model::id::ChannelId> = ctx
+            .cache()
+            .read()
+            .guilds[&msg.guild_id.unwrap()]
+            .read()
+            .channels
+            .values()
+            .find(|&chan_lock| {
+                let chan = chan_lock.read();
+                let uppername = chan.name.to_ascii_uppercase();
+                chan.kind == serenity::model::channel::ChannelType::Category && (
+                    uppername == "ARCHIVED" || uppername == "ARCHIVE" || uppername == "ARCHIVES" || uppername == "ARCHIVAL"
+                )
+            })
+            .map(|chan_lock| chan_lock.read().id);
+        if let Some(archive_channel_id) = maybe_archive_channel_id {
+            if Some(archive_channel_id) != curr_chan_cat {
+                let conn = ctx.get_pool_arc().get()?;
+                let ca_id = pg_insert_helper!(
+                    &conn, chan_archival,
+                    from_cat_id => curr_chan_cat.map(SmartHax),
+                    to_cat_id => SmartHax(archive_channel_id),
+                    moved_chan_id => SmartHax(msg.channel_id),
+                    dir_is_archiving => true,
+                    command_msg_id => SmartHax(msg.id),
+                    done => false,
+                    failed => false,
+                )?;
+                msg.channel_id.edit(&ctx, |ec| ec.category(archive_channel_id)).map_err(|e| {
+                    //We don't actually change the error, we just use this to do something only if an error occurs, after the error occurs, before returning.
+                    log_any_error!(diesel::update(dsl::chan_archival.filter(dsl::rowid.eq(ca_id))).set(dsl::failed.eq(true)).execute(&conn));
+                    e
+                })?;
+                diesel::update(dsl::chan_archival.filter(dsl::rowid.eq(ca_id))).set(dsl::done.eq(true)).execute(&conn)?;
+                msg.reply(&ctx, "Channel archived")?;
+            }else{
+                msg.reply(&ctx, "Channel is already archived!")?;
             }
         } else {
-            msg.reply(&ctx, "This command does not (yet) work on anything but the channel the command is sent in.")?;
+            msg.reply(&ctx, "Error: Could not find archive channel category.")?;
         }
-        Ok(())
+    } else {
+        msg.reply(&ctx, "Unrecognized channel.")?;
+    }
+    Ok(())
+}
+
+command_log!(
+    #[aliases("archivechannel","archive channel","archivechan","archive","<a:fk:657813786236813314>","<:fkstill:657815565452443667>")]
+    fn archive_channel(ctx, msg, args) {
+        archive_channel_impl(ctx, msg, args.rest())
     }
 );
 
