@@ -7,6 +7,7 @@ use diesel::prelude::*;
 use crate::{
     schema,
     CetrizineError,
+    error::CustomError,
     ContextExt,
     SmartHax,
     SmartHaxO,
@@ -40,10 +41,10 @@ pub fn start_game(
 ) -> Result<(), CetrizineError> {
     use serenity::model::channel::ReactionType;
     use schema::rps_game::dsl;
-    let my_id = crate::USER_ID.load(std::sync::atomic::Ordering::Relaxed)
+    let my_id = crate::USER_ID.load(std::sync::atomic::Ordering::Relaxed);
     if challenger_id == my_id {
         error!("Received a challenge from myself! This should never happen. Game_location: {:?}", game_location);
-        return Error("Received a challenge from myself! This should never happen.");
+        return Err("Received a challenge from myself! This should never happen.".to_string().into());
     }
     let is_vs_me = receiver_id == my_id;
     let eightball_msg = EIGHTBALL_MESSAGES[(barely_randomness % EIGHTBALL_MESSAGES.len().try_into().unwrap():u64) as usize];
@@ -57,7 +58,7 @@ pub fn start_game(
         receiver_id.mention()
     };
     let maybe_choice = if is_vs_me {
-        Some(["Rock", "Paper", "Scissors"][barely_randomness % 3])
+        Some(["Rock", "Paper", "Scissors"][(barely_randomness % 3) as usize])
     } else { None };
     let challenger_channel = challenger_id.create_dm_channel(&ctx)?;
     let challenger_msg = challenger_channel.send_message(&ctx, |cm|
@@ -68,7 +69,9 @@ pub fn start_game(
         ))
     )?;
 
-    let maybe_receiver_msg = if !is_vs_me {
+    let mut maybe_receiver_msg = None;
+    let mut maybe_receiver_channel = None;
+    if !is_vs_me {
         let receiver_channel = receiver_id.create_dm_channel(&ctx)?;
         let receiver_msg = receiver_channel.send_message(&ctx, |cm|
             cm.content(format!( 
@@ -77,9 +80,8 @@ pub fn start_game(
                 &common_text,
             ))
         )?;
-        Some(receiver_msg)
-    } else {
-        None
+        maybe_receiver_channel = Some(receiver_channel);
+        maybe_receiver_msg = Some(receiver_msg);
     };
 
     let mr_lonely = if challenger_id == receiver_id {
@@ -96,17 +98,27 @@ pub fn start_game(
         dsl::receiver_choice.eq(maybe_choice),
         dsl::receiver_wants_rematch.eq(is_vs_me),
     )).returning(dsl::rowid).get_result(&*conn)?;
-    game_location.say(
-        &ctx,
-        format!(
-            "{} has challenged {} to a rock-paper-scissors duel!\nWisdom: {}\nGame #{}{}", 
-            challenger_id.mention(),
-            receiver_name,
-            eightball_msg,
-            rowid,
-            mr_lonely,
-        )
-    )?;
+    if game_location == challenger_channel.id {
+        //this game is happening in DMs
+        challenger_channel.say(&ctx, format!("Game #{}", rowid))?;
+        if let Some(receiver_channel) = maybe_receiver_channel {
+            if receiver_channel.id != challenger_channel.id {
+                receiver_channel.say(&ctx, format!("Game #{}", rowid))?;
+            }
+        }
+    } else {
+        game_location.say(
+            &ctx,
+            format!(
+                "{} has challenged {} to a rock-paper-scissors duel!\nWisdom: {}\nGame #{}{}", 
+                challenger_id.mention(),
+                receiver_name,
+                eightball_msg,
+                rowid,
+                mr_lonely,
+            )
+        )?;
+    }
     for emoji in ["\u{1f5ff}","\u{1f4f0}","\u{2702}"].iter() {
         challenger_msg.react(ctx, *emoji)?;
         if let Some(receiver_msg) = &maybe_receiver_msg {

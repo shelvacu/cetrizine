@@ -1,1 +1,1 @@
-ALTER TABLE rps ALTER receiver_private_message_id DROP NOT NULL;
+ALTER TABLE rps_game ALTER receiver_private_message_id DROP NOT NULL;
