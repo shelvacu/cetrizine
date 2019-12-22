@@ -84,7 +84,7 @@ snowflake_impl!{WebhookId}
 #[derive(Debug,AsExpression)]
 #[sql_type = "BigInt"]
 #[sql_type = "SQL_Snowflake"]
-pub struct SmartHaxO<T: Debug>(pub Option<T>);
+pub struct SmartHaxO<T: Debug + InnerSnowflake>(pub Option<T>);
 
 
 impl<DB, T> ToSql<Int8, DB> for SmartHaxO<T>
@@ -112,7 +112,7 @@ where
 #[derive(Debug,AsExpression)]
 #[sql_type = "BigInt"]
 #[sql_type = "SQL_Snowflake"]
-pub struct SmartHax<T: Debug>(pub T);
+pub struct SmartHax<T: InnerSnowflake + Debug>(pub T);
 
 
 impl<DB, T> ToSql<Int8, DB> for SmartHax<T>

@@ -1,0 +1,1 @@
+ALTER TABLE rps ALTER receiver_private_message_id DROP NOT NULL;

@@ -36,6 +36,7 @@ const MIGRATIONS:&[MigrationSpec] = &[
     Normal(include_str!("migrations/22to23-sanity-returns.sql")), //22
     Normal(include_str!("migrations/23to24-archivals-again.sql")), //23
     Normal(include_str!("migrations/24to25-update-message-kind-check.sql")), //24
+    Normal(include_str!("migrations/25to26-rps-receiver-null.sql")), //25
 ];
 
 pub const CURRENT_MIGRATION_VERSION:usize = MIGRATIONS.len();

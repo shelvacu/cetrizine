@@ -85,13 +85,14 @@ lazy_static! {
 // f**k IDs:
 // <a:fk:657813786236813314>
 // <:fkstill:657815565452443667>
-const FK_ANIM_EMOJI_ID:u64 = 657813786236813314;
-const FK_STIL_EMOJI_ID:u64 = 657815565452443667;
+//const FK_ANIM_EMOJI_ID:u64 = 657813786236813314;
+//const FK_STIL_EMOJI_ID:u64 = 657815565452443667;
 
 pub fn cetrizine_framework(my_id: UserId) -> StandardFramework {
     //Init lazy static values, so that any errors happen on program start instead of when some command is invoked.
     lazy_static::initialize(&USER_PING_RE);
     lazy_static::initialize(&CHANNEL_PING_RE);
+    lazy_static::initialize(&CUSTOM_EMOJI_RE);
     lazy_static::initialize(&MSG_URL_RE);
     lazy_static::initialize(&CHANNEL_URL_RE);
     let owners = vec![

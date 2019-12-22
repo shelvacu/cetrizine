@@ -119,8 +119,8 @@ use diesel::expression::AsExpression;
 #[allow(clippy::unreadable_literal)]
 const DISCORD_MAX_SNOWFLAKE:Snowflake = Snowflake(9223372036854775807); // (2^63)-1
 
-static SESSION_ID:AtomicI64 = AtomicI64::new(0);
-static USER_ID:AtomicU64 = AtomicU64::new(0);
+pub static SESSION_ID:AtomicI64 = AtomicI64::new(0);
+pub static USER_ID:AtomicU64 = AtomicU64::new(0);
 lazy_static! {
     static ref DO_RE_EXEC:StdMutex<Option<u64>> = StdMutex::new(None);
 }
@@ -481,7 +481,8 @@ impl Handler {
                         reaction.channel_id.0 ^ reaction.message_id.0 ^ reaction.user_id.0,
                     )?;
                 }
-            }
+            } //otherwise this was on some random message that we don't care about
+            
             return Ok(())
         }
         let choice = match reaction.emoji {
