@@ -46,7 +46,6 @@ pub fn get_migration_version(conn: &diesel::pg::PgConnection) -> i64 {
     use crate::schema::migration_version::dsl;
 
     dsl::migration_version.select(dsl::version).limit(1).get_result(conn).unwrap():i64
-    //conn.query("SELECT version FROM migration_version LIMIT 1", &[]).unwrap().get(0).get(0)
 }
 
 pub fn migration_is_current(conn: &diesel::pg::PgConnection) -> bool {

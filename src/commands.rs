@@ -351,7 +351,7 @@ fn unarchive_channel_impl(ctx: &mut Context, msg:&Message, args:&str) -> Result<
             .category_id;
         let maybe_ca:Option<ChanArchival> = dsl::chan_archival.filter(
             (
-                dsl::moved_chan_id.eq(SmartHax(msg.channel_id))
+                dsl::moved_chan_id.eq(SmartHax(chan_to_unarchive))
             ).and(
                 diesel::dsl::not(dsl::failed)
             ).and(
@@ -367,13 +367,13 @@ fn unarchive_channel_impl(ctx: &mut Context, msg:&Message, args:&str) -> Result<
                     &conn, chan_archival,
                     from_cat_id => SmartHaxO(curr_chan_cat),
                     to_cat_id => SmartHaxO(to_cat),
-                    moved_chan_id => SmartHax(msg.channel_id),
+                    moved_chan_id => SmartHax(chan_to_unarchive),
                     dir_is_archiving => false,
                     command_msg_id => SmartHax(msg.id),
                     done => false,
                     failed => false,
                 )?;
-                msg.channel_id.edit(&ctx, |ec| ec.category(to_cat)).map_err(|e| {
+                chan_to_unarchive.edit(&ctx, |ec| ec.category(to_cat)).map_err(|e| {
                     //We don't actually change the error, we just use this to do something only if an error occurs, after the error occurs, before returning.
                     log_any_error!(diesel::update(dsl::chan_archival.filter(dsl::rowid.eq(ca_id))).set(dsl::failed.eq(true)).execute(&conn));
                     e
@@ -431,13 +431,13 @@ fn archive_channel_impl(ctx: &mut Context, msg:&Message, args:&str) -> Result<()
                     &conn, chan_archival,
                     from_cat_id => curr_chan_cat.map(SmartHax),
                     to_cat_id => SmartHax(archive_channel_id),
-                    moved_chan_id => SmartHax(msg.channel_id),
+                    moved_chan_id => SmartHax(chan_to_archive),
                     dir_is_archiving => true,
                     command_msg_id => SmartHax(msg.id),
                     done => false,
                     failed => false,
                 )?;
-                msg.channel_id.edit(&ctx, |ec| ec.category(archive_channel_id)).map_err(|e| {
+                chan_to_archive.edit(&ctx, |ec| ec.category(archive_channel_id)).map_err(|e| {
                     //We don't actually change the error, we just use this to do something only if an error occurs, after the error occurs, before returning.
                     log_any_error!(diesel::update(dsl::chan_archival.filter(dsl::rowid.eq(ca_id))).set(dsl::failed.eq(true)).execute(&conn));
                     e
@@ -459,6 +459,7 @@ fn archive_channel_impl(ctx: &mut Context, msg:&Message, args:&str) -> Result<()
 command_log!(
     #[aliases("archivechannel","archive channel","archivechan","archive","<a:fk:657813786236813314>","<:fkstill:657815565452443667>")]
     fn archive_channel(ctx, msg, args) {
+        //warn!("archiving with args {:?}", args.rest());
         archive_channel_impl(ctx, msg, args.rest())
     }
 );
