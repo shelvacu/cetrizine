@@ -77,7 +77,7 @@ fn inner_dynamic_prefix(
 lazy_static! {
     static ref USER_PING_RE: Regex = Regex::new(r"^\s*<@!?(\d+)>\s*$").unwrap();
     static ref CHANNEL_PING_RE: Regex = Regex::new(r"^\s*<#(\d+)>\s*$").unwrap();
-    static ref CUSTOM_EMOJI_RE: Regex = Regex::new(r#"^\s*<a?:[^: '">]*:(\d+)>"#)
+    static ref CUSTOM_EMOJI_RE: Regex = Regex::new(r#"^\s*<a?:[^: '">]*:(\d+)>"#).unwrap();
     static ref MSG_URL_RE: Regex = Regex::new(r"^\s*https://discordapp.com/channels/(?P<server_id>@me|\d+)/(?P<channel_id>\d+)/(?P<message_id>\d+)\s*$").unwrap();
     static ref CHANNEL_URL_RE: Regex = Regex::new(r"^\s*https://discordapp.com/channels/(?P<server_id>@me|\d+)/(?P<channel_id>\d+)\s*$").unwrap();
 }
@@ -327,7 +327,7 @@ fn move_messages(ctx: &mut Context, msg: &Message, mut args: Args) -> CommandRes
     Ok(())
 }
 
-fn unarchive_channel_impl(ctx: &mut Context, msg:&Message, args:String) -> Result<(),&'static str> {
+fn unarchive_channel_impl(ctx: &mut Context, msg:&Message, args:&str) -> Result<(),CetrizineError> {
     use schema::chan_archival::dsl;
     use crate::db_types::Snowflake;
     #[derive(Queryable,Debug)]
@@ -341,7 +341,7 @@ fn unarchive_channel_impl(ctx: &mut Context, msg:&Message, args:String) -> Resul
         done: bool,
         failed: bool,
     }
-    if let Some(chan_to_unarchive) = ChannelId::from_command_args(ctx, msg, args) {
+    if let Ok(chan_to_unarchive) = ChannelId::from_command_args(ctx, msg, args) {
         let conn = ctx.get_pool_arc().get()?;
         let curr_chan_cat = chan_to_unarchive
             .to_channel_cached(&ctx)
@@ -400,9 +400,9 @@ command_log!(
     
 );
 
-fn archive_channel_impl(ctx: &mut Context, msg:&Message, args:&str) -> Result<(),&'static str> {
+fn archive_channel_impl(ctx: &mut Context, msg:&Message, args:&str) -> Result<(),CetrizineError> {
     use schema::chan_archival::dsl;
-    if let Some(chan_to_archive) = ChannelId::from_command_args(ctx, msg, args) {
+    if let Ok(chan_to_archive) = ChannelId::from_command_args(ctx, msg, args) {
         let curr_chan_cat = chan_to_archive
             .to_channel_cached(&ctx)
             .ok_or_else(|| "Expected channel to be cached".to_string())?

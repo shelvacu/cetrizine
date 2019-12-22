@@ -1170,7 +1170,7 @@ impl Handler {
         Ok(())
     }
     
-    /// This fn will block until it appears that all previous messages have been retrieved. Caller should probably be run in another thread.
+    /// This fn will block until it appears that all previous messages have been retrieved. Caller should probably run this in another thread.
     fn grab_full_archive(
         conn: &diesel::pg::PgConnection,
         ctx: Context,
@@ -1178,33 +1178,18 @@ impl Handler {
         channel_archiver_sender: Sender<(Channel, String)>,
         session_id: i64,
     ) -> Result<(), CetrizineError> {
-        //let tx = conn.transaction()?;
         let mut ready_rowid = 0;
         let mut private_channels_to_archive:Vec<ChannelId> = Vec::new();
         let rdy = &rdy;
         conn.transaction(|| {
             let dbscu = DbSerenityCurrentUser::from(rdy.user.clone());
-            // info!("current_user is {:#?}", &dbscu);
-            // use diesel::sql_types::{Text, Integer};
-
-            // #[derive(QueryableByName)]
-            // struct Blarg {
-            //     #[sql_type = "Text"]
-            //     blarg: String
-            // }
-            // // let debug_res:Blarg = diesel::sql_query("SELECT $1::text as blarg;").bind::<Integer, _>(3).get_result(conn)?;
-            // let debug_res:Blarg = diesel::sql_query("SELECT $1::text as blarg;").bind::<SQL_SerenityCurrentUser, _>(&dbscu).get_result(conn)?;
-            // // let debug_res:Blarg = diesel::sql_query("SELECT (").bind::<SQL_SerenityCurrentUser, _>(&dbscu).sql(")::text as blarg;").get_result(conn)?;
-            // debug!("postgres thinks its {}", debug_res.blarg);
-            // std::process::exit(1);
             ready_rowid = pg_insert_helper!(
                 conn, ready,
-                session_id => &rdy.session_id, //rdy.session_id.filter_null(),
+                session_id => &rdy.session_id,
                 shard => rdy.shard.map(|a| vec![
                     a[0].try_into().unwrap():i64,
                     a[1].try_into().unwrap():i64,
                 ]),
-                // trace => rdy.trace.iter().map(|s| s.filter_null()).collect():Vec<_>,
                 trace => rdy.trace.iter().collect():Vec<_>,
                 user_info => dbscu,
                 version => rdy.version.try_into().unwrap():i64,
@@ -1298,7 +1283,7 @@ impl Handler {
     } //fn grab_archive ...
     
     fn message_result(&self, ctx: Context, msg: Message) -> Result<(), CetrizineError> {
-        let handler_start = ctx.raw_event.expect("Should be eventful").happened_at_chrono;
+        let handler_start = (&ctx.raw_event).as_ref().expect("Should be eventful").happened_at_chrono;
         let conn = ctx.get_pool_arc().get()?;
         let guild_str;
         if let Some(guild_id) = msg.guild_id {
