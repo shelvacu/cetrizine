@@ -1,0 +1,9 @@
+mutation CreateIssue($title: String, $content: String) {
+  createIssue( input: {repositoryId: "MDEwOlJlcG9zaXRvcnkxODE5OTIzNDU=", title: $title, body: $content} ) {
+    issue {
+      id,
+      number,
+      url
+    }
+  }
+}

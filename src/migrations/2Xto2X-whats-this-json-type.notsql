@@ -1,0 +1,54 @@
+-- Instead of just storing all this data, I want to actually be querying and indexing it. However, instead of trying to doing the strategy of a table for every type of discord object and then ALTERing TABLEs when discord updates, instead I'd like to take the data directly from the raw_message table with a zillion indexes. The first step of this is to make the raw_messages table store the data as postgres's json type as opposed to raw text or even the hypothetical binary. However, I still want to store the text if the JSON is invalid.
+
+-- I plan to do this in a few steps, to hopefully make for minimal downtime:
+-- 1. Add a column for json-typed data, default null
+-- 2. Edit the code to properly fill that column as messages arrive.
+-- 3. Start an SQL job to "fill in" legacy rows
+-- 4. Once done, add a constraint to make sure either the data is marked as invalid JSON or the JSON column is filled.
+
+-- Actually, don't do any of that because the better data type `jsonb` doesn't store things perfectly, so just add lots of indexes.
+
+-- //https://stackoverflow.com/a/30187851/1267729
+
+create or replace function custom_is_valid_jsonb(p_json text)
+    returns boolean
+as
+$$
+begin
+    return (p_json::jsonb is not null);
+exception 
+    when others then
+    return false;  
+end;
+$$
+language plpgsql
+--parallel safe
+immutable;
+
+--Either returns the jsonb value or NULL
+create or replace function as_valid_jsonb(p_json text)
+    returns jsonb
+as
+$$
+begin
+    return p_json::jsonb;
+exception
+    when others then
+    return false;
+end;
+$$
+language plpgsql
+--parallel safe
+immutable;
+
+create type payload 
+
+create or replace function as_valid_payload(p_json jsonb)
+    returns jsonb
+as
+$$
+begin
+    
+
+CREATE INDEX CONCURRENTLY if not exists raw_message_has_valid_json ON raw_message ((as_valid_jsonb(content_text) IS NOT NULL));
+

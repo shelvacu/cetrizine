@@ -1,6 +1,8 @@
 #![feature(type_ascription)]
 #![deny(unused_must_use)]
 #![allow(clippy::mutex_atomic,unused_imports,non_camel_case_types)]
+// Diesel causes these everywhere; TODO
+#![allow(clippy::single_component_path_imports)]
 #![recursion_limit="1024"]
 
 #[macro_use]
@@ -111,6 +113,7 @@ pub mod commands;
 pub mod attachments;
 pub mod error;
 pub mod rps;
+pub mod file_issue;
 
 use db_types::*;
 use diesel::prelude::*;
@@ -152,10 +155,16 @@ impl typemap::Key for NewAttachmentNotifSenderKey {
     type Value = Mutex<Sender<()>>;
 }
 
+struct GithubTokenKey;
+impl typemap::Key for GithubTokenKey {
+    type Value = String;
+}
+
 trait ContextExt {
     fn get_pool_arc(&self) -> ArcPool;
     fn is_bot(&self) -> bool;
     fn get_attachment_sender(&self) -> Sender<()>;
+    fn get_github_token(&self) -> Option<String>;
 }
 
 impl ContextExt for Context {
@@ -171,6 +180,10 @@ impl ContextExt for Context {
         let data_lock = self.data.read();
         let lock = data_lock.get::<NewAttachmentNotifSenderKey>().unwrap().lock();
         (&*lock).clone()
+    }
+
+    fn get_github_token(&self) -> Option<String> {
+        self.data.read().get::<GithubTokenKey>().as_ref().map(|s| (*s).clone())
     }
 }    
 
@@ -1759,6 +1772,9 @@ DB migration version: {}",
             let shard_manager_arc = Arc::clone(&client.shard_manager);
             data.insert::<ShardManagerArcKey>(shard_manager_arc);
             data.insert::<NewAttachmentNotifSenderKey>(Mutex::new(new_attachment_tx));
+            if let Ok(token) = std::env::var("GITHUB_TOKEN") {
+                data.insert::<GithubTokenKey>(token);
+            }
         }
         
         client.start().expect("Error starting client");

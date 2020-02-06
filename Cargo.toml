@@ -25,6 +25,8 @@ flate2 = "1.0"
 regex = "1"
 serde_json = "1.0"
 serde = { version = "1.0", features = ["derive"] }
+graphql_client = "0.8.0"
+failure = "0.1.6"
 
 [dependencies.diesel]
 version = "1.4.2"
