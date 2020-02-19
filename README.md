@@ -56,7 +56,7 @@ cargo build --release
 cargo run --release -- --help
 ```
 
-Cetrizine requires a discord token which you can get by making an application at https://discordapp.com/developers/applications/ and the postgres path from above. **The first time cetrizine runs** (when the database is empty) **you must also supply `--init-db`**.
+Cetrizine requires the postgres path from above and a discord token which you can get by making an application at https://discordapp.com/developers/applications/. **The first time cetrizine runs** (when the database is empty) **you must also supply `--init-db`**.
 
 The postgres path and discord token can both be specified as an argument or pulled from the environment:
 
