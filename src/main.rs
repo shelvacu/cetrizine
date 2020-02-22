@@ -12,7 +12,7 @@ extern crate lazy_static;
 #[macro_use]
 extern crate log;
 extern crate backtrace;
-extern crate simplelog;
+extern crate env_logger;
 extern crate multi_log;
 
 //Main discord library
@@ -113,7 +113,7 @@ pub mod commands;
 pub mod attachments;
 pub mod error;
 pub mod rps;
-pub mod file_issue;
+//pub mod file_issue;
 
 use db_types::*;
 use diesel::prelude::*;
@@ -1611,11 +1611,12 @@ DB migration version: {}",
         let manager = r2d2::ConnectionManager::new(postgres_path.as_str());
         let pool = r2d2::Pool::new(manager).unwrap();
 
-        let simple_logger_config = simplelog::ConfigBuilder::new()
-            .set_target_level(simplelog::LevelFilter::Error)
-            .set_location_level(simplelog::LevelFilter::Error)
-            .build();
-        let simple_logger = simplelog::SimpleLogger::new(simplelog::LevelFilter::Debug, simple_logger_config);
+        // let simple_logger_config = simplelog::ConfigBuilder::new()
+        //     .set_target_level(simplelog::LevelFilter::Error)
+        //     .set_location_level(simplelog::LevelFilter::Error)
+        //     .build();
+        // let simple_logger = simplelog::SimpleLogger::new(simplelog::LevelFilter::Debug, simple_logger_config);
+        let env_logger = Box::new( env_logger::Logger::from_default_env() );
         let pg_logger = Box::new(
             postgres_logger::PostgresLogger::new(
                 pool.clone(),
@@ -1623,7 +1624,7 @@ DB migration version: {}",
                 beginning_of_time
             )
         );
-        multi_log::MultiLogger::init(vec![simple_logger, pg_logger], simplelog::Level::Debug).expect("Failed to intialize logging.");
+        multi_log::MultiLogger::init(vec![env_logger, pg_logger], log::Level::Debug).expect("Failed to intialize logging.");
         info!("Cetrizine logging initialized.");
         
         let session_id;
@@ -1721,40 +1722,43 @@ DB migration version: {}",
                     }
                     info!("Found {} rows needing scan.", needing_scan.len());
                     for row in needing_scan {
-                        attachments::scan_urls_from_ws_message(&*conn, &row)?;
+                        log_any_error!{ attachments::scan_urls_from_ws_message(&*conn, &row) };
                     }
                 }
             })():Result<(), CetrizineError>};
         });
 
-        let download_thread_arc_pool = Arc::clone(&arc_pool);
-        std::thread::spawn(move ||{
-            use schema::raw_message_url::dsl;
-            let conn = download_thread_arc_pool.get().unwrap();
-            log_any_error!{(|| {
-                let mut empty_notif_count:u64 = 0;
-                loop {
-                    let needing_download:Vec<attachments::RawMessageUrl> = dsl::raw_message_url.filter(
-                        dsl::been_downloaded.eq(false)
-                    ).limit(100).load(&conn)?;
-                    if needing_download.is_empty() {
-                        if empty_notif_count % 1024 == 0 {
-                            info!("Found no rows needing download.");
+        if false {
+            let download_thread_arc_pool = Arc::clone(&arc_pool);
+            std::thread::spawn(move ||{
+                use schema::raw_message_url::dsl;
+                let conn = download_thread_arc_pool.get().unwrap();
+                log_any_error!{(|| {
+                    let mut empty_notif_count:u64 = 0;
+                    loop {
+                        let needing_download:Vec<attachments::RawMessageUrl> = dsl::raw_message_url.filter(
+                            dsl::been_downloaded.eq(false)
+                        ).limit(100).load(&conn)?;
+                        if needing_download.is_empty() {
+                            if empty_notif_count % 1024 == 0 {
+                                info!("Found no rows needing download.");
+                            }
+                            empty_notif_count += 1;
+                            std::thread::sleep(Duration::from_millis(1000));
+                            continue;
                         }
-                        empty_notif_count += 1;
-                        std::thread::sleep(Duration::from_millis(1000));
-                        continue;
-                    }
-                    info!("Found {} rows needing download.", needing_download.len());
+                        info!("Found {} rows needing download.", needing_download.len());
 
-                    let mut client = attachments::build_client();
+                        let mut client = attachments::build_client();
 
-                    for row in needing_download {
-                        attachments::download_scanned_url(&*conn, &mut client, session_id, beginning_of_time, row)?;
+                        for row in needing_download {
+                            attachments::download_scanned_url(&*conn, &mut client, session_id, beginning_of_time, row)?;
+                        }
                     }
-                }
-            })():Result<(), CetrizineError>};
-        });
+                })():Result<(), CetrizineError>};
+            });
+    
+        }
 
         let is_bot = discord_token.starts_with("Bot ");
         if is_bot {
