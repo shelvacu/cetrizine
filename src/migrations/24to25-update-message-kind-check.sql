@@ -32,6 +32,6 @@ UPDATE message SET kind =
 
 
 
-CREATE INDEX message_kind_check ON message ((kind IN ('Regular','GroupRecipientAddition','GroupRecipientRemoval','GroupCallCreation','GroupNameUpdate','GroupIconUpdate','PinsAdd','MemberJoin', 'NitroBoost', 'NitroBoostTier1', 'NitroBoostTier2', 'NitroBoostTier3')));
+CREATE INDEX CONCURRENTLY message_kind_check ON message ((kind IN ('Regular','GroupRecipientAddition','GroupRecipientRemoval','GroupCallCreation','GroupNameUpdate','GroupIconUpdate','PinsAdd','MemberJoin', 'NitroBoost', 'NitroBoostTier1', 'NitroBoostTier2', 'NitroBoostTier3')));
 
-CREATE INDEX guild_channel_kind_check ON guild_channel ((kind IN ('Text','Private','Voice','Group','Category','News','Store')));
+CREATE INDEX CONCURRENTLY guild_channel_kind_check ON guild_channel ((kind IN ('Text','Private','Voice','Group','Category','News','Store')));
