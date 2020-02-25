@@ -92,14 +92,18 @@ macro_rules! pg_insert_helper {
 }
 
 macro_rules! log_any_error {
-    ( $e:expr ) => {{
+    ( context: $c:expr, $e:expr ) => {{
+        let ctx_str = format!("{:?}", $c);
         match $e {
             Ok(val) => Some(val),
             Err(e) => {
-                warn!("ERROR in {}:{} \"{}\" {:?}",file!(),line!(),stringify!($e),e);
+                warn!("ERROR in {}:{}\ncontext: {} => {}\n\"{}\" {:?}",file!(),line!(),stringify!($c),ctx_str,stringify!($e),e);
                 None
             },
         }
+    }};
+    ( $e:expr ) => {{
+        log_any_error!( context: (), $e)
     }};
 }
 
@@ -620,7 +624,7 @@ impl Handler {
 
         let session_id_copy = self.session_id;
         std::thread::spawn(move || {
-            log_any_error!(Self::archive_guild(
+            log_any_error!(context: guild.id, Self::archive_guild(
                 &*conn,
                 &ctx,
                 &guild,
@@ -681,6 +685,7 @@ impl Handler {
         let session_id_copy = self.session_id;
         std::thread::spawn(move || {
             log_any_error!(
+                context: &ready,
                 Self::grab_full_archive(
                     &*conn,
                     ctx,
@@ -1495,18 +1500,27 @@ impl Handler {
 
 impl EventHandler for Handler {
     fn reaction_add(&self, ctx: Context, add_reaction: Reaction) {
-        log_any_error!(self.reaction_add_result(ctx, add_reaction));
+        log_any_error!(
+            context: &add_reaction,
+            self.reaction_add_result(ctx, add_reaction)
+        );
     }
     fn ready(&self, ctx: Context, ready: Ready) {
         // Discord can send multiple readys! What the fuck discord!?
         // This is okay, at worst there'll be multiple channels to
         // archive in the queue.
-        log_any_error!(self.ready_result(ctx, ready));
+        log_any_error!(
+            context: &ready,
+            self.ready_result(ctx, ready)
+        );
     }
 
     fn message(&self, ctx: Context, msg: Message) {
         //if true { return }
-        log_any_error!(self.message_result(ctx, msg));
+        log_any_error!(
+            context: &msg,
+            self.message_result(ctx, msg)
+        );
     }
 
     /*fn channel_create(&self, ctx: Context, channel: Arc<RwLock<GuildChannel>>) {
@@ -1514,34 +1528,58 @@ impl EventHandler for Handler {
     }*/
 
     fn raw_websocket_packet(&self, ctx: Context, packet: WsEvent) {
-        log_any_error!(self.archive_raw_event(ctx, packet));
+        log_any_error!(
+            context: &packet,
+            self.archive_raw_event(ctx, packet)
+        );
     }
 
     fn shard_stage_update(&self, ctx: Context, ssue: ShardStageUpdateEvent) {
-        log_any_error!(self.record_shard_stage_update(ctx, ssue));
+        log_any_error!(
+            context: &ssue,
+            self.record_shard_stage_update(ctx, ssue)
+        );
     }
 
     fn guild_create(&self, ctx: Context, guild: Guild, is_new: bool) {
-        log_any_error!(self.guild_create_result(ctx, guild, is_new));
+        log_any_error!(
+            context: (&guild, is_new),
+            self.guild_create_result(ctx, guild, is_new)
+        );
     }
 
     fn channel_update(&self, context: Context, old: Option<Channel>, new: Channel) {
-        log_any_error!(self.channel_update_result(context, old, new));
+        log_any_error!(
+            context: (old.as_ref(), &new),
+            self.channel_update_result(context, old, new)
+        );
     }
 
     fn guild_member_update(&self, context: Context, old: Option<Member>, new: Member) {
-        log_any_error!(self.guild_member_update_result(context, old, new));
+        log_any_error!(
+            context: (old.as_ref(), &new),
+            self.guild_member_update_result(context, old, new)
+        );
     }
 
     fn guild_role_create(&self, context: Context, guild_id: GuildId, _new: Role) {
-        log_any_error!(self.recheck_guild_permissions(context, guild_id));
+        log_any_error!(
+            context: guild_id,
+            self.recheck_guild_permissions(context, guild_id)
+        );
     }
 
     fn guild_role_delete(&self, context: Context, guild_id: GuildId, _removed_id: RoleId, _removed: Option<Role>) {
-        log_any_error!(self.recheck_guild_permissions(context, guild_id));
+        log_any_error!(
+            context: guild_id,
+            self.recheck_guild_permissions(context, guild_id)
+        );
     }
     fn guild_role_update(&self, context: Context, guild_id: GuildId, _old: Option<Role>, _new: Role) {
-        log_any_error!(self.recheck_guild_permissions(context, guild_id));
+        log_any_error!(
+            context: guild_id,
+            self.recheck_guild_permissions(context, guild_id)
+        );
     }
     fn guild_update(
         &self,
@@ -1549,7 +1587,10 @@ impl EventHandler for Handler {
         _old_data_if_available: Option<Arc<RwLock<Guild>>>,
         new: PartialGuild
     ) {
-        log_any_error!(self.recheck_guild_permissions(context, new.id));
+        log_any_error!(
+            context: new.id,
+            self.recheck_guild_permissions(context, new.id)
+        );
     }
 }
 
@@ -1564,6 +1605,7 @@ fn main() {
         let mut no_auto_migrate = false;
         let mut migrate_only = false;
         let mut init_db = false;
+        let mut do_downloads = false;
 
         {
             let mut ap = ArgumentParser::new();
@@ -1605,6 +1647,9 @@ DB migration version: {}",
             ap.refer(&mut init_db)
                 .add_option(&["--init-db"], StoreTrue,
                             "Initializes the database schema. Note that the `CREATE DATABASE` command needs to be run separately. This will also run the program normally unless --migrate-only is specified.");
+            ap.refer(&mut do_downloads)
+                .add_option(&["--do-downloads"], StoreTrue, 
+                            "If set, this will download all urls, particularly including attachments.");
             ap.parse_args_or_exit()
         }
 
@@ -1678,10 +1723,11 @@ DB migration version: {}",
         let threads_arc_pool = Arc::clone(&arc_pool);
         std::thread::spawn(move || {
             while let Ok((channel, guild_name)) = chan_rx.recv() {
-                if let Some(conn) = log_any_error!(threads_arc_pool.get()) {
-                    let res = Handler::grab_channel_archive(threads_cache_and_http.as_ref(), &*conn, &channel, guild_name);
-                    log_any_error!(res);
-                }
+                let conn = threads_arc_pool.get().unwrap();
+                log_any_error!(
+                    context: (&channel, &guild_name),
+                    Handler::grab_channel_archive(threads_cache_and_http.as_ref(), &*conn, &channel, guild_name)
+                );
             }
         });
 
@@ -1692,11 +1738,14 @@ DB migration version: {}",
             loop {
                 while let Ok(()) = new_attachment_rx.try_recv() {}
                 info!("Starting archive_attachments thread");
-                log_any_error!(attachments::archive_attachments(
-                    &attachment_download_thread_arc_pool,
-                    session_id,
-                    beginning_of_time,
-                ));
+                log_any_error!(
+                    context: (),
+                    attachments::archive_attachments(
+                        &attachment_download_thread_arc_pool,
+                        session_id,
+                        beginning_of_time,
+                    )
+                );
                 info!("Finished archive_attachments thread");
                 new_attachment_rx.recv().unwrap();
             }
@@ -1706,7 +1755,7 @@ DB migration version: {}",
         std::thread::spawn(move ||{
             use schema::raw_message::dsl;
             let conn = scan_thread_arc_pool.get().unwrap();
-            log_any_error!{(|| {
+            log_any_error!{context: (), (|| {
                 let mut empty_notif_count:u64 = 0;
                 loop {
                     let needing_scan:Vec<attachments::RawMessage> = dsl::raw_message.filter(
@@ -1722,13 +1771,16 @@ DB migration version: {}",
                     }
                     info!("Found {} rows needing scan.", needing_scan.len());
                     for row in needing_scan {
-                        log_any_error!{ attachments::scan_urls_from_ws_message(&*conn, &row) };
+                        log_any_error!{
+                            context: &row,
+                            attachments::scan_urls_from_ws_message(&*conn, &row)
+                        };
                     }
                 }
             })():Result<(), CetrizineError>};
         });
 
-        if false {
+        if do_downloads {
             let download_thread_arc_pool = Arc::clone(&arc_pool);
             std::thread::spawn(move ||{
                 use schema::raw_message_url::dsl;
