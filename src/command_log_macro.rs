@@ -17,7 +17,10 @@ macro_rules! command_log {
             #[allow(unused_mut)]
             let mut $args_arg = args_arg;
             let res:Result<(), CetrizineError> = $b;
-            log_any_error!(res);
+            log_any_error!(
+                context: $msg_arg,
+                res
+            );
             Ok(())
         }
     };

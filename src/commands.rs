@@ -103,7 +103,10 @@ pub fn cetrizine_framework(my_id: UserId) -> StandardFramework {
         .configure(
             |c| c
                 .dynamic_prefix(move |context, message| {
-                    log_any_error!(inner_dynamic_prefix(context, message)).flatten()
+                    log_any_error!(
+                        context: message,
+                        inner_dynamic_prefix(context, message)
+                    ).flatten()
                 })
                 .by_space(false)
                 .on_mention(Some(my_id))
@@ -376,7 +379,12 @@ fn unarchive_channel_impl(ctx: &mut Context, msg:&Message, args:&str) -> Result<
                 )?;
                 chan_to_unarchive.edit(&ctx, |ec| ec.category(to_cat)).map_err(|e| {
                     //We don't actually change the error, we just use this to do something only if an error occurs, after the error occurs, before returning.
-                    log_any_error!(diesel::update(dsl::chan_archival.filter(dsl::rowid.eq(ca_id))).set(dsl::failed.eq(true)).execute(&conn));
+                    log_any_error!(
+                        context: ca_id,
+                        diesel::update(
+                            dsl::chan_archival.filter(dsl::rowid.eq(ca_id))
+                        ).set(dsl::failed.eq(true)).execute(&conn)
+                    );
                     e
                 })?;
                 diesel::update(dsl::chan_archival.filter(dsl::rowid.eq(ca_id))).set(dsl::done.eq(true)).execute(&conn)?;
@@ -410,11 +418,9 @@ fn archive_channel_impl(ctx: &mut Context, msg:&Message, args:&str) -> Result<()
             .guild().ok_or_else(|| "Expected channel to be a GuildChannel".to_string())?
             .read()
             .category_id;
-        let maybe_archive_channel_id:Option<serenity::model::id::ChannelId> = ctx
-            .cache()
-            .read()
-            .guilds[&msg.guild_id.unwrap()]
-            .read()
+        let cache_lock = ctx.cache().read();
+        let guild_lock = cache_lock.guilds[&msg.guild_id.unwrap()].read();
+        let maybe_archive_channel = guild_lock
             .channels
             .values()
             .find(|&chan_lock| {
@@ -424,23 +430,34 @@ fn archive_channel_impl(ctx: &mut Context, msg:&Message, args:&str) -> Result<()
                     uppername == "ARCHIVED" || uppername == "ARCHIVE" || uppername == "ARCHIVES" || uppername == "ARCHIVAL"
                 )
             })
-            .map(|chan_lock| chan_lock.read().id);
-        if let Some(archive_channel_id) = maybe_archive_channel_id {
-            if Some(archive_channel_id) != curr_chan_cat {
+            .map(|chan_lock| chan_lock.read());
+        if let Some(archive_channel) = maybe_archive_channel {
+            if Some(archive_channel.id) != curr_chan_cat {
                 let conn = ctx.get_pool_arc().get()?;
                 let ca_id = pg_insert_helper!(
                     &conn, chan_archival,
                     from_cat_id => curr_chan_cat.map(SmartHax),
-                    to_cat_id => SmartHax(archive_channel_id),
+                    to_cat_id => SmartHax(archive_channel.id),
                     moved_chan_id => SmartHax(chan_to_archive),
                     dir_is_archiving => true,
                     command_msg_id => SmartHax(msg.id),
                     done => false,
                     failed => false,
                 )?;
-                chan_to_archive.edit(&ctx, |ec| ec.category(archive_channel_id)).map_err(|e| {
+                chan_to_archive.edit(
+                    &ctx, 
+                    |ec| {
+                        ec.category(archive_channel.id)
+                          //.permissions(archive_channel.permissions)
+                    }
+                ).map_err(|e| {
                     //We don't actually change the error, we just use this to do something only if an error occurs, after the error occurs, before returning.
-                    log_any_error!(diesel::update(dsl::chan_archival.filter(dsl::rowid.eq(ca_id))).set(dsl::failed.eq(true)).execute(&conn));
+                    log_any_error!(
+                        context: ca_id,
+                        diesel::update(
+                            dsl::chan_archival.filter(dsl::rowid.eq(ca_id))
+                        ).set(dsl::failed.eq(true)).execute(&conn)
+                    );
                     e
                 })?;
                 diesel::update(dsl::chan_archival.filter(dsl::rowid.eq(ca_id))).set(dsl::done.eq(true)).execute(&conn)?;
@@ -518,6 +535,7 @@ command_log!(
     }
 );
 
+#[cfg(feature = "live-rebuild")]
 command_log!(
     #[aliases("r&r","rnr")]
     fn recompile_and_run(ctx, message) {
@@ -554,6 +572,15 @@ command_log!(
             }
             ctx.data.read().get::<ShardManagerArcKey>().unwrap().lock().shutdown_all();
         }
+        Ok(())
+    }
+);
+
+#[cfg(not(feature = "live-rebuild"))]
+command_log!(
+    #[aliases("r&r","rnr")]
+    fn recompile_and_run(ctx, message) {
+        message.reply(&ctx, "R&R command disabled")?;
         Ok(())
     }
 );

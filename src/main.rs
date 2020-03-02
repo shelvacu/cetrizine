@@ -30,6 +30,7 @@ extern crate chrono;
 extern crate time;
 
 //This crate allows calling cargo and getting structured output
+#[cfg(feature = "live-rebuild")]
 extern crate coral;
 
 //A map for per-channel mutexes. Somewhat overkill for what I need, but no other crate can have *many* readers at a time.
@@ -93,6 +94,7 @@ macro_rules! pg_insert_helper {
 
 macro_rules! log_any_error {
     ( context: $c:expr, $e:expr ) => {{
+        // TODO: This is most likely very slow, since it has to convert to a string *every* time, regardless of whether it will be used.
         let ctx_str = format!("{:?}", $c);
         match $e {
             Ok(val) => Some(val),
