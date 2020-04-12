@@ -22,7 +22,7 @@ multi_log = "0.1"
 typemap = "0.3"
 lazy_static = "*"
 evmap = "^6.0"
-reqwest = "0.9"
+reqwest = "0.10.0"
 hex = "0.3"
 flate2 = "1.0"
 regex = "1"
@@ -31,13 +31,14 @@ serde = { version = "1.0", features = ["derive"] }
 graphql_client = "0.8.0"
 failure = "0.1.6"
 env_logger = "0.7.1"
+futures = "0.3.4"
 
 [dependencies.diesel]
 version = "1.4.2"
 features = ["postgres","chrono","r2d2"]
 
 [dependencies.serenity]
-version = "=0.7.0-shel4"
+version = "=0.8.2-shel5"
 path = "./serenity"
 default-features = true
 features = ["raw-ws-event", "allow_exhaustive_enum"]

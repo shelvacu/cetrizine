@@ -117,53 +117,24 @@ pub fn cetrizine_framework(my_id: UserId) -> StandardFramework {
             info!("A user named {:?} tried to execute an unknown command: {}", msg.author.name, unrecognised_command_name);
         })
         .group(&DEFAULT_GROUP)
-        .group(&GUILD_ADMIN_GROUP)
+        .group(&GUILDADMIN_GROUP)
         .group(&OWNER_GROUP)
 }
 
-group!({
-    name: "default",
-    options: {},
-    commands: [
-        pony,
-        ping,
-        set_prefix,
-        get_prefix,
-        help_info,
-        binary,
-        binary_en,
-        binary_de,
-        horse,
-        invite_url,
-        test,
-        rps_start,
-    ],
-});
+#[group]
+#[commands(pony, ping, set_prefix, get_prefix, help_info, binary, binary_de, binary_en, horse, invite_url, test, rps_start)]
+struct Default;
 
-group!({
-    name: "guild_admin",
-    options: {
-        only_in: "guilds",
-        required_permissions: [ADMINISTRATOR],
-    },
-    commands: [
-        archive_channel,
-        unarchive_channel,
-        move_messages,
-    ],
-});
+#[group]
+#[only_in(guilds)]
+#[allowed_roles(Administrator)]
+#[commands(archive_channel, unarchive_channel, move_messages)]
+struct GuildAdmin;
 
-group!({
-    name: "owner",
-    options: {
-        owners_only: true,
-    },
-    commands: [
-        recompile_and_run,
-        raw_message,
-        restart_bot,
-    ],
-});
+#[group]
+#[owners_only]
+#[commands(recompile_and_run, raw_message, restart_bot)]
+struct Owner;
 
 #[command]
 fn test(ctx: &mut Context, msg: &Message, mut args: Args) -> CommandResult {
@@ -711,14 +682,14 @@ fn decode_binary(
     let mut bytes:Vec<u8> = Vec::new();
     for chunk in bits.chunks_exact(8usize) {
         let byte:u8 =
-            chunk[0].into_u8() << 7
-            | chunk[1].into_u8() << 6
-            | chunk[2].into_u8() << 5
-            | chunk[3].into_u8() << 4
-            | chunk[4].into_u8() << 3
-            | chunk[5].into_u8() << 2
-            | chunk[6].into_u8() << 1
-            | chunk[7].into_u8();
+            chunk[0].into_u8() << 7 |
+            chunk[1].into_u8() << 6 |
+            chunk[2].into_u8() << 5 |
+            chunk[3].into_u8() << 4 |
+            chunk[4].into_u8() << 3 |
+            chunk[5].into_u8() << 2 |
+            chunk[6].into_u8() << 1 |
+            chunk[7].into_u8();
         bytes.push(byte);
     }
     let bytes = bytes;

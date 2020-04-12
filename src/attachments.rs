@@ -55,8 +55,8 @@ pub fn build_client() -> Client {
     );
     Client::builder()
         .default_headers(headers)
-        .gzip(true)
-        .connect_timeout(Some(std::time::Duration::from_secs(30)))
+        //.gzip(true)
+        .connect_timeout(std::time::Duration::from_secs(30))
         //.h2_prior_knowledge()
         .build()
         .unwrap()
@@ -461,12 +461,12 @@ pub fn download_scanned_url(
         let download_data_rowid:Option<i64>;
         let headers:HeaderMap;
         let downloaded_at = crate::db_types::DbMoment::now(session_id, beginning_of_time);
-        match client.get(url).send() {
-            Ok(mut response) => {
+        match futures::executor::block_on(client.get(url).send()) {
+            Ok(response) => {
                 response_code = Some(response.status().as_u16().try_into().unwrap());
                 success = true;
-                let mut data:Vec<u8> = Vec::new();
-                response.read_to_end(&mut data)?;
+                headers = response.headers().clone();
+                let data = futures::executor::block_on(response.bytes())?;
                 let sum = hex::encode_upper({
                     let mut s = Sha256::default();
                     s.input(&data);
@@ -483,12 +483,11 @@ pub fn download_scanned_url(
                 } else {
                     download_data_rowid = Some(diesel::insert_into(dd_dsl::download_data).values((
                         dd_dsl::sha256sum_hex.eq(&sum),
-                        dd_dsl::data.eq(&data),
+                        dd_dsl::data.eq(&*data),
                         dd_dsl::downloaded_at.eq(downloaded_at.clone()),
                     )).returning(dd_dsl::rowid).get_result(conn)?);
                     info!("Downloaded and inserted {}, size is {}, sum is {}", &url, data.len(), &sum);
                 }
-                headers = response.headers().clone();
             },
             Err(err) => {
                 response_code = err.status().map(|s| s.as_u16().try_into().unwrap());
@@ -580,12 +579,12 @@ pub fn archive_attachments(
                 let download_data_rowid:Option<i64>;
                 let headers:HeaderMap;
                 let downloaded_at = crate::db_types::DbMoment::now(session_id, beginning_of_time);
-                match client.get(url).send() {
-                    Ok(mut response) => {
+                match futures::executor::block_on(client.get(url).send()) {
+                    Ok(response) => {
+                        headers = response.headers().clone();
                         response_code = Some(response.status().as_u16().try_into().unwrap());
                         success = true;
-                        let mut data:Vec<u8> = Vec::new();
-                        response.read_to_end(&mut data)?;
+                        let data = futures::executor::block_on(response.bytes())?;
                         let sum = hex::encode_upper({
                             let mut s = Sha256::default();
                             s.input(&data);
@@ -602,12 +601,11 @@ pub fn archive_attachments(
                         } else {
                             download_data_rowid = Some(diesel::insert_into(dd_dsl::download_data).values((
                                 dd_dsl::sha256sum_hex.eq(&sum),
-                                dd_dsl::data.eq(&data),
+                                dd_dsl::data.eq(&*data),
                                 dd_dsl::downloaded_at.eq(downloaded_at.clone()),
                             )).returning(dd_dsl::rowid).get_result(&conn)?);
                             info!("Downloaded and inserted {}, size is {}, sum is {}", &url, data.len(), &sum);
                         }
-                        headers = response.headers().clone();
                     },
                     Err(err) => {
                         response_code = err.status().map(|s| s.as_u16().try_into().unwrap());

@@ -491,7 +491,7 @@ impl From<CurrentUser> for DbSerenityCurrentUser {
             },
             email: cu.email.filter_null(),
             mfa_enabled: cu.mfa_enabled,
-            verified: cu.verified,
+            verified: cu.verified.unwrap_or(false),
         }
     }
 }

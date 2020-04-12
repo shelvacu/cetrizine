@@ -65,6 +65,7 @@ error_type! {
         Serenity(serenity::Error),
         Io(std::io::Error),
         SerdeJson(serde_json::Error),
+        Reqwest(reqwest::Error),
         Custom(CustomError),
     }
 }

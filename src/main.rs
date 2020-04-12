@@ -166,11 +166,17 @@ impl typemap::Key for GithubTokenKey {
     type Value = String;
 }
 
+struct MinMessageKey;
+impl typemap::Key for MinMessageKey {
+    type Value = i64;
+}
+
 trait ContextExt {
     fn get_pool_arc(&self) -> ArcPool;
     fn is_bot(&self) -> bool;
     fn get_attachment_sender(&self) -> Sender<()>;
     fn get_github_token(&self) -> Option<String>;
+    fn get_min_message(&self) -> i64;
 }
 
 impl ContextExt for Context {
@@ -191,7 +197,11 @@ impl ContextExt for Context {
     fn get_github_token(&self) -> Option<String> {
         self.data.read().get::<GithubTokenKey>().as_ref().map(|s| (*s).clone())
     }
-}    
+
+    fn get_min_message(&self) -> i64 {
+        *self.data.read().get::<MinMessageKey>().unwrap()
+    }
+}
 
 struct Handler{
     beginning_of_time: std::time::Instant,
@@ -288,7 +298,7 @@ enum_stringify!{ serenity::model::guild::ExplicitContentFilter => None, WithoutR
 enum_stringify!{ serenity::model::guild::MfaLevel => None, Elevated }
 enum_stringify!{ serenity::model::guild::VerificationLevel => None, Low, Medium, High, Higher }
 enum_stringify!{ serenity::model::channel::ChannelType => Text, Private, Voice, Group, Category, News, Store }
-enum_stringify!{ serenity::model::gateway::ActivityType => Playing, Streaming, Listening }
+enum_stringify!{ serenity::model::gateway::ActivityType => Playing, Streaming, Listening, Custom }
 enum_stringify!{ serenity::model::user::OnlineStatus => DoNotDisturb, Idle, Invisible, Offline, Online }
 enum_stringify!{ serenity::gateway::ConnectionStage => Connected, Connecting, Disconnected, Handshake, Identifying, Resuming }
 enum_stringify!{ log::Level => Error, Warn, Info, Debug, Trace }
@@ -700,7 +710,7 @@ impl Handler {
         Ok(())
     }
             
-    fn archive_message(conn: &diesel::pg::PgConnection, msg: &Message, recvd_at:DateTime<Utc>) -> Result<(), CetrizineError> {
+    fn archive_message(conn: &diesel::pg::PgConnection, msg: &Message, recvd_at:DateTime<Utc>, known_guild: Option<GuildId>) -> Result<(), CetrizineError> {
         conn.transaction(|| {
             let message_rowid:i64 = pg_insert_helper!(
                 conn, message,
@@ -709,7 +719,7 @@ impl Handler {
                 channel_id => SmartHax(msg.channel_id),
                 content => msg.content.filter_null(),
                 edited_timestamp => msg.edited_timestamp,
-                guild_id => SmartHaxO(msg.guild_id),
+                guild_id => SmartHaxO(msg.guild_id.or(known_guild)),
                 kind => msg.kind.into_str(),
                 member => msg.member.clone().map(DbPartialMember::from),
                 mention_everyone => msg.mention_everyone,
@@ -798,10 +808,11 @@ impl Handler {
 
     //guild_name is used purely for the pretty output and debug messages
     fn grab_channel_archive(
-        http: impl AsRef<serenity::http::raw::Http>,
+        http: impl AsRef<serenity::http::client::Http>,
         conn: &diesel::pg::PgConnection,
         chan: &Channel,
-        guild_name: String
+        guild_name: String,
+        min_message: i64,
     ) -> Result<(), CetrizineError> {
         use schema::message_archive_gets::dsl;
         #[derive(Debug,Queryable)]
@@ -924,7 +935,9 @@ impl Handler {
         trace!("gap_end is {:?}",gap_end);
         let mut earliest_message_recvd = get_before;
 
-        while earliest_message_recvd > gap_end {
+        let mut artificial_stop = false;
+
+        while earliest_message_recvd > gap_end && !artificial_stop {
             let asking_for = 100u8;
             
             let mut msgs;
@@ -948,11 +961,16 @@ impl Handler {
             });
             let msgs = msgs;
 
+            if let Some(msg) = &msgs.last() {
+                if (msg.id.0 as i64) < min_message { artificial_stop = true }
+            }
+
             let mut should_break = false;
+            let guild_id:Option<GuildId> = chan.clone().guild().map(|g| g.read().guild_id);
             conn.transaction(|| {
                 for msg in &msgs {
                     trace!("Archiving Message id {:?}", msg.id);
-                    Self::archive_message(conn, msg, recvd_at)?;
+                    Self::archive_message(conn, msg, recvd_at, guild_id)?;
                 }
                 if msgs.is_empty() {
                     should_break = true;
@@ -986,9 +1004,9 @@ impl Handler {
             if should_break { break; }
         } //while earliest_message_recvd > gap_end
         
-        if got_messages {
+        if got_messages && !artificial_stop {
             trace!("recursing!");
-            Self::grab_channel_archive(http, conn, chan, guild_name)
+            Self::grab_channel_archive(http, conn, chan, guild_name, min_message)
         } else {
             Ok(())
         }
@@ -1327,7 +1345,7 @@ impl Handler {
         //let tx = conn.transaction()?;
         conn.transaction(|| {
             use schema::message_archive_gets::dsl;
-            Self::archive_message(&conn, &msg, handler_start)?;
+            Self::archive_message(&conn, &msg, handler_start, None)?;
             if !msg.attachments.is_empty() {
                 ctx.get_attachment_sender().send(()).unwrap();
             }
@@ -1607,7 +1625,6 @@ fn main() {
         let mut no_auto_migrate = false;
         let mut migrate_only = false;
         let mut init_db = false;
-        let mut do_downloads = false;
 
         {
             let mut ap = ArgumentParser::new();
@@ -1649,9 +1666,9 @@ DB migration version: {}",
             ap.refer(&mut init_db)
                 .add_option(&["--init-db"], StoreTrue,
                             "Initializes the database schema. Note that the `CREATE DATABASE` command needs to be run separately. This will also run the program normally unless --migrate-only is specified.");
-            ap.refer(&mut do_downloads)
-                .add_option(&["--do-downloads"], StoreTrue, 
-                            "If set, this will download all urls, particularly including attachments.");
+            // ap.refer(&mut do_downloads)
+            //     .add_option(&["--do-downloads"], StoreTrue, 
+            //                 "If set, this will download all urls, particularly including attachments.");
             ap.parse_args_or_exit()
         }
 
@@ -1673,6 +1690,9 @@ DB migration version: {}",
         );
         multi_log::MultiLogger::init(vec![env_logger, pg_logger], log::Level::Debug).expect("Failed to intialize logging.");
         info!("Cetrizine logging initialized.");
+
+        let do_downloads:bool;
+        let min_message:i64;
         
         let session_id;
         {
@@ -1707,6 +1727,11 @@ DB migration version: {}",
                 git_sha_ref => env!("VERGEN_SHA"),
                 git_commit_date => env!("VERGEN_COMMIT_DATE"),
             ).unwrap();
+
+            use schema::single::dsl as sdsl;
+            let res:(Snowflake, bool) = sdsl::single.select((sdsl::only_messages_after, sdsl::do_downloads)).get_result(&*setup_conn).unwrap();
+            min_message = (res.0).0;
+            do_downloads = res.1;
         }
 
         SESSION_ID.store(session_id, Ordering::Relaxed);
@@ -1728,7 +1753,7 @@ DB migration version: {}",
                 let conn = threads_arc_pool.get().unwrap();
                 log_any_error!(
                     context: (&channel, &guild_name),
-                    Handler::grab_channel_archive(threads_cache_and_http.as_ref(), &*conn, &channel, guild_name)
+                    Handler::grab_channel_archive(threads_cache_and_http.as_ref(), &*conn, &channel, guild_name, min_message)
                 );
             }
         });
@@ -1833,6 +1858,7 @@ DB migration version: {}",
             if let Ok(token) = std::env::var("GITHUB_TOKEN") {
                 data.insert::<GithubTokenKey>(token);
             }
+            data.insert::<MinMessageKey>(min_message);
         }
         
         client.start().expect("Error starting client");

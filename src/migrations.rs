@@ -37,6 +37,9 @@ const MIGRATIONS:&[MigrationSpec] = &[
     Normal(include_str!("migrations/23to24-archivals-again.sql")), //23
     Normal(include_str!("migrations/24to25-update-message-kind-check.sql")), //24
     Normal(include_str!("migrations/25to26-rps-receiver-null.sql")), //25
+    Normal(include_str!("migrations/26to27-rawmessage-idx.sql")), //26
+    Normal(include_str!("migrations/27to28-single.sql")), //27
+    //Normal(include_str!("migrations/26to27-timequote.sql")),
 ];
 
 pub const CURRENT_MIGRATION_VERSION:usize = MIGRATIONS.len();
@@ -52,7 +55,6 @@ pub fn get_migration_version(conn: &diesel::pg::PgConnection) -> i64 {
 pub fn migration_is_current(conn: &diesel::pg::PgConnection) -> bool {
     get_migration_version(conn) == (CURRENT_MIGRATION_VERSION as i64)
 }
-    
 
 pub fn do_postgres_migrate(conn: &diesel::pg::PgConnection) {
     use crate::schema::migration_version::dsl::*;
@@ -68,6 +70,7 @@ pub fn do_postgres_migrate(conn: &diesel::pg::PgConnection) {
                 info!("Running migration v{} => v{}", mv, mv+1);
                 conn.transaction(|| {
                     use crate::diesel::connection::SimpleConnection;
+                    dbg!(sql_str);
                     conn.batch_execute(sql_str).unwrap();
                     if mv == 15 {
                         #[derive(QueryableByName,Debug,Clone,Copy)]

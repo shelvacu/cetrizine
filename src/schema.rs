@@ -478,6 +478,16 @@ table! {
     }
 }
 
+table! {
+    use diesel::sql_types::*;
+    use crate::db_types::*;
+    single (shelvacu_is_awesome) {
+        shelvacu_is_awesome -> Bool,
+        only_messages_after -> SQL_Snowflake,
+        do_downloads -> Bool,
+    }
+}
+
 joinable!(attachment -> message (message_rowid));
 joinable!(embed -> message (message_rowid));
 joinable!(embed_field -> embed (embed_rowid));
@@ -536,4 +546,5 @@ allow_tables_to_appear_in_same_query!(
     download_header,
     raw_message_url,
     chan_archival,
+    single,
 );
