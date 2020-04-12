@@ -39,6 +39,7 @@ const MIGRATIONS:&[MigrationSpec] = &[
     Normal(include_str!("migrations/25to26-rps-receiver-null.sql")), //25
     Normal(include_str!("migrations/26to27-rawmessage-idx.sql")), //26
     Normal(include_str!("migrations/27to28-single.sql")), //27
+    Normal(include_str!("migrations/28to29-custom-presence.sql"))
     //Normal(include_str!("migrations/26to27-timequote.sql")),
 ];
 
