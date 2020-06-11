@@ -1,4 +1,4 @@
-CREATE FUNCTION idify(u discord_user)
+CREATE OR REPLACE FUNCTION idify(u discord_user)
  RETURNS text AS $$
 BEGIN
  RETURN (u).user_name || '#' || lpad((u).discriminator::text,4,'0');
@@ -97,5 +97,5 @@ CREATE OR REPLACE VIEW message_view AS SELECT
 UPDATE message SET guild_id = c.guild_id from channel_view c where message.channel_id = c.discord_id and message.guild_id IS NULL and c.guild_id IS NOT NULL;
 
 --CREATE INDEX IF NOT EXISTS message_guild_id_channel_id_timestamp_timetz ON message(guild_id, channel_id, ("timestamp"::timetz));
-CREATE INDEX IF NOT EXISTS message_guild_id_channel_id_timestamp_utc ON message(guild_id, channel_id, (timezone('UTC', "timestamp")::time));
+CREATE INDEX IF NOT EXISTS matt_index ON message(guild_id, channel_id, ((author).discord_id), (timezone('UTC', "timestamp")::time));
 --CREATE INDEX IF NOT EXISTS message_timestamp_timetz ON message(("timestamp"::timetz));

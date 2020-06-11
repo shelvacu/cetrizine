@@ -273,7 +273,6 @@ impl UrlsInto for serenity::model::event::MessageUpdateEvent {
         //scan message?
         self.embeds.urls_into(urls);
         self.mentions.urls_into(urls);
-        //reactions?
     }
 }
 
@@ -367,7 +366,7 @@ pub fn scan_urls_from_ws_message(
             GuildBanAdd(ev) => ev.user.urls_into(&mut urls),
             GuildBanRemove(ev) => ev.user.urls_into(&mut urls),
             GuildCreate(ev) => ev.guild.urls_into(&mut urls),
-            GuildDelete(ev) => ev.guild.urls_into(&mut urls),
+            GuildDelete(_) => (),
             GuildEmojisUpdate(ev) => ev.emojis.values().cloned().urls_into(&mut urls),
             GuildIntegrationsUpdate(_) => (),
             GuildMemberAdd(ev) => ev.member.urls_into(&mut urls),
