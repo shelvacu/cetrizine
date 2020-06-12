@@ -1347,7 +1347,7 @@ impl Handler {
             use schema::message_archive_gets::dsl;
             Self::archive_message(&conn, &msg, handler_start, None)?;
             if !msg.attachments.is_empty() {
-                ctx.get_attachment_sender().send(()).unwrap();
+                let _ = ctx.get_attachment_sender().send(());
             }
             make_synthetic_mag(&conn, self.session_id, msg.channel_id.get_snowflake_i64())?;
             diesel::update(dsl::message_archive_gets.filter(
