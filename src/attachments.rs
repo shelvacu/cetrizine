@@ -2,7 +2,7 @@ use crate::sha2::{Sha256, Digest};
 use crate::reqwest::{
     self,
     header::{self, HeaderMap},
-    Client,
+    blocking::Client,
 };
 use crate::hex;
 use crate::schema;
@@ -460,12 +460,12 @@ pub fn download_scanned_url(
         let download_data_rowid:Option<i64>;
         let headers:HeaderMap;
         let downloaded_at = crate::db_types::DbMoment::now(session_id, beginning_of_time);
-        match futures::executor::block_on(client.get(url).send()) {
+        match client.get(url).send() {
             Ok(response) => {
                 response_code = Some(response.status().as_u16().try_into().unwrap());
                 success = true;
                 headers = response.headers().clone();
-                let data = futures::executor::block_on(response.bytes())?;
+                let data = response.bytes()?;
                 let sum = hex::encode_upper({
                     let mut s = Sha256::default();
                     s.input(&data);
@@ -578,12 +578,12 @@ pub fn archive_attachments(
                 let download_data_rowid:Option<i64>;
                 let headers:HeaderMap;
                 let downloaded_at = crate::db_types::DbMoment::now(session_id, beginning_of_time);
-                match futures::executor::block_on(client.get(url).send()) {
+                match client.get(url).send() {
                     Ok(response) => {
                         headers = response.headers().clone();
                         response_code = Some(response.status().as_u16().try_into().unwrap());
                         success = true;
-                        let data = futures::executor::block_on(response.bytes())?;
+                        let data = response.bytes()?;
                         let sum = hex::encode_upper({
                             let mut s = Sha256::default();
                             s.input(&data);
